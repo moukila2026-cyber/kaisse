@@ -256,6 +256,20 @@ function Landing({ onGetStarted }) {
 /* ------------------------------------------------------------------ */
 /*  Auth Page                                                           */
 /* ------------------------------------------------------------------ */
+const authInputStyle = {
+  width: "100%", padding: "13px 14px 13px 42px", borderRadius: 10, border: "1.5px solid #E4DDC9",
+  fontSize: 14.5, fontFamily: "'Inter', sans-serif", outline: "none", background: "#fff", boxSizing: "border-box",
+};
+
+function Field({ icon: Icon, ...props }) {
+  return (
+    <div style={{ position: "relative", marginBottom: 14 }}>
+      <Icon size={16} color="#8A8368" style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
+      <input style={authInputStyle} {...props} />
+    </div>
+  );
+}
+
 function Auth({ onAuth, onBack }) {
   const [mode, setMode] = useState("signup"); // signup | login
   const [form, setForm] = useState({ nom: "", prenom: "", telephone: "", agence: "", email: "", motdepasse: "" });
@@ -341,18 +355,6 @@ function Auth({ onAuth, onBack }) {
       role: profil.role,
     });
   };
-
-  const inputStyle = {
-    width: "100%", padding: "13px 14px 13px 42px", borderRadius: 10, border: "1.5px solid #E4DDC9",
-    fontSize: 14.5, fontFamily: "'Inter', sans-serif", outline: "none", background: "#fff", boxSizing: "border-box",
-  };
-
-  const Field = ({ icon: Icon, ...props }) => (
-    <div style={{ position: "relative", marginBottom: 14 }}>
-      <Icon size={16} color="#8A8368" style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
-      <input style={inputStyle} {...props} />
-    </div>
-  );
 
   return (
     <div className="f-body auth-shell" style={{ background: "#F6F3EC" }}>
