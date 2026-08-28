@@ -449,39 +449,45 @@ function Dashboard({ user, onLogout }) {
   const [points, setPoints] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [clotures, setClotures] = useState([]);
+  const [operateurs, setOperateurs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [txModal, setTxModal] = useState(null); // null | 'depot' | 'retrait'
+  const [pointModalOpen, setPointModalOpen] = useState(false);
+
+  const loadData = async () => {
+    setLoading(true);
+
+    const { data: pts } = await supabase
+      .from("points")
+      .select("*, profils!points_gerant_id_fkey(nom, prenom)")
+      .eq("agence_id", user.agence_id);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const { data: txs } = await supabase
+      .from("transactions")
+      .select("*, operateurs(nom), profils(nom, prenom)")
+      .gte("created_at", `${today}T00:00:00`)
+      .order("created_at", { ascending: false });
+
+    const { data: clos } = await supabase
+      .from("clotures")
+      .select("*")
+      .eq("date", today);
+
+    const { data: ops } = await supabase
+      .from("operateurs")
+      .select("*");
+
+    setPoints(pts || []);
+    setTransactions(txs || []);
+    setClotures(clos || []);
+    setOperateurs(ops || []);
+    setLoading(false);
+  };
 
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-
-      const { data: pts } = await supabase
-        .from("points")
-        .select("*, profils!points_gerant_id_fkey(nom, prenom)")
-        .eq("agence_id", user.agence_id);
-
-      const today = new Date().toISOString().slice(0, 10);
-      const { data: txs } = await supabase
-        .from("transactions")
-        .select("*, operateurs(nom), profils(nom, prenom)")
-        .gte("created_at", `${today}T00:00:00`)
-        .order("created_at", { ascending: false });
-
-      const { data: clos } = await supabase
-        .from("clotures")
-        .select("*")
-        .eq("date", today);
-
-      if (!cancelled) {
-        setPoints(pts || []);
-        setTransactions(txs || []);
-        setClotures(clos || []);
-        setLoading(false);
-      }
-    };
-    load();
-    return () => { cancelled = true; };
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user.agence_id]);
 
   const float = useMemo(
@@ -648,8 +654,8 @@ function Dashboard({ user, onLogout }) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
               <div style={{ fontSize: 14, fontWeight: 600 }}>Historique du jour</div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button style={btnGhost}><ArrowDownCircle size={14} style={{ marginRight: 6 }} />Dépôt</button>
-                <button style={btnDark}><ArrowUpCircle size={14} style={{ marginRight: 6 }} />Retrait</button>
+                <button style={btnGhost} onClick={() => setTxModal("depot")}><ArrowDownCircle size={14} style={{ marginRight: 6 }} />Dépôt</button>
+                <button style={btnDark} onClick={() => setTxModal("retrait")}><ArrowUpCircle size={14} style={{ marginRight: 6 }} />Retrait</button>
               </div>
             </div>
             <div className="tx-scroll"><TxTable rows={transactions} /></div>
@@ -657,7 +663,13 @@ function Dashboard({ user, onLogout }) {
         )}
 
         {nav === "points" && (
-          <div className="points-grid">
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+              <button style={btnDark} onClick={() => setPointModalOpen(true)}>
+                <Building2 size={14} style={{ marginRight: 6 }} />Créer un point
+              </button>
+            </div>
+            <div className="points-grid">
             {points.length === 0 && (
               <div style={{ fontSize: 13, color: "#8A8368" }}>Aucun point enregistré pour le moment.</div>
             )}
@@ -684,7 +696,8 @@ function Dashboard({ user, onLogout }) {
                 </div>
               );
             })}
-          </div>
+            </div>
+          </>
         )}
 
         {nav === "parametres" && (
@@ -704,9 +717,149 @@ function Dashboard({ user, onLogout }) {
           </div>
         )}
       </main>
+
+      {txModal && (
+        <TxModal
+          type={txModal}
+          points={points}
+          operateurs={operateurs}
+          user={user}
+          onClose={() => setTxModal(null)}
+          onSaved={() => { setTxModal(null); loadData(); }}
+        />
+      )}
+
+      {pointModalOpen && (
+        <PointModal
+          user={user}
+          onClose={() => setPointModalOpen(false)}
+          onSaved={() => { setPointModalOpen(false); loadData(); }}
+        />
+      )}
     </div>
   );
 }
+
+function ModalShell({ title, onClose, children }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(11,31,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
+      <div style={{ background: "#fff", borderRadius: 16, padding: 26, width: "100%", maxWidth: 380 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <div className="f-display" style={{ fontSize: 19, fontWeight: 600 }}>{title}</div>
+          <div onClick={onClose} style={{ cursor: "pointer", color: "#8A8368", fontSize: 18, lineHeight: 1 }}>×</div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function TxModal({ type, points, operateurs, user, onClose, onSaved }) {
+  const [operateurId, setOperateurId] = useState(operateurs[0]?.id || "");
+  const [pointId, setPointId] = useState(points[0]?.id || "");
+  const [montant, setMontant] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    setError("");
+    if (!pointId) return setError("Crée d'abord un point pour ton agence.");
+    if (!operateurId) return setError("Choisis un opérateur.");
+    if (!montant || Number(montant) <= 0) return setError("Entre un montant valide.");
+
+    setLoading(true);
+    const operateur = operateurs.find((o) => o.id === Number(operateurId) || o.id === operateurId);
+    const commission = Number(montant) * Number(operateur?.taux_commission || 0);
+
+    const { error: err } = await supabase.from("transactions").insert({
+      point_id: pointId,
+      agent_id: user.id,
+      operateur_id: operateurId,
+      type,
+      montant: Number(montant),
+      commission,
+    });
+
+    setLoading(false);
+    if (err) return setError(err.message);
+    onSaved();
+  };
+
+  return (
+    <ModalShell title={type === "depot" ? "Nouveau dépôt" : "Nouveau retrait"} onClose={onClose}>
+      {points.length === 0 ? (
+        <div style={{ fontSize: 13.5, color: "#8A8368" }}>
+          Tu n'as pas encore de point enregistré. Ferme cette fenêtre et clique sur "Créer un point" dans l'onglet Points & agents.
+        </div>
+      ) : (
+        <>
+          <label style={modalLabel}>Point</label>
+          <select style={modalInput} value={pointId} onChange={(e) => setPointId(e.target.value)}>
+            {points.map((p) => <option key={p.id} value={p.id}>{p.nom}</option>)}
+          </select>
+
+          <label style={modalLabel}>Opérateur</label>
+          <select style={modalInput} value={operateurId} onChange={(e) => setOperateurId(e.target.value)}>
+            {operateurs.map((o) => <option key={o.id} value={o.id}>{o.nom}</option>)}
+          </select>
+
+          <label style={modalLabel}>Montant (FCFA)</label>
+          <input style={modalInput} type="number" placeholder="0" value={montant} onChange={(e) => setMontant(e.target.value)} />
+
+          {error && <div style={{ fontSize: 12.5, color: "#B8452F", margin: "8px 0" }}>{error}</div>}
+
+          <button onClick={submit} disabled={loading} style={{ ...btnDark, width: "100%", justifyContent: "center", padding: "12px 0", marginTop: 10, opacity: loading ? 0.7 : 1 }}>
+            {loading ? "Enregistrement…" : "Enregistrer"}
+          </button>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+function PointModal({ user, onClose, onSaved }) {
+  const [nom, setNom] = useState("");
+  const [seuil, setSeuil] = useState("100000");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    setError("");
+    if (!nom) return setError("Donne un nom à ce point.");
+    setLoading(true);
+    const { error: err } = await supabase.from("points").insert({
+      agence_id: user.agence_id,
+      nom,
+      gerant_id: user.id,
+      seuil_alerte_float: Number(seuil) || 0,
+    });
+    setLoading(false);
+    if (err) return setError(err.message);
+    onSaved();
+  };
+
+  return (
+    <ModalShell title="Créer un point" onClose={onClose}>
+      <label style={modalLabel}>Nom du point</label>
+      <input style={modalInput} placeholder="Ex. Plateau 03" value={nom} onChange={(e) => setNom(e.target.value)} />
+
+      <label style={modalLabel}>Seuil d'alerte float (FCFA)</label>
+      <input style={modalInput} type="number" value={seuil} onChange={(e) => setSeuil(e.target.value)} />
+
+      {error && <div style={{ fontSize: 12.5, color: "#B8452F", margin: "8px 0" }}>{error}</div>}
+
+      <button onClick={submit} disabled={loading} style={{ ...btnDark, width: "100%", justifyContent: "center", padding: "12px 0", marginTop: 10, opacity: loading ? 0.7 : 1 }}>
+        {loading ? "Création…" : "Créer le point"}
+      </button>
+    </ModalShell>
+  );
+}
+
+const modalLabel = { display: "block", fontSize: 12.5, color: "#8A8368", fontWeight: 600, marginBottom: 6, marginTop: 12 };
+const modalInput = {
+  width: "100%", padding: "11px 12px", borderRadius: 9, border: "1.5px solid #E4DDC9",
+  fontSize: 14, fontFamily: "'Inter', sans-serif", outline: "none", background: "#fff", boxSizing: "border-box",
+};
 
 function KPI({ label, value, unit, icon: Icon, accent }) {
   return (
