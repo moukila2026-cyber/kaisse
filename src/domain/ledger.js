@@ -7,6 +7,22 @@ export const OPERATION_TYPES = [
 
 export const EXPENSE_CATEGORIES = ["Transport", "Restauration", "Frais opératoires", "Autre"];
 
+export function getReportDateRange(endDate, period = "day") {
+  const days = period === "week" ? 7 : period === "month" ? 30 : 1;
+  const end = new Date(`${endDate}T00:00:00.000Z`);
+  if (!Number.isFinite(end.getTime())) return { startDate: endDate, endDate, days: 1 };
+  const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate() - days + 1));
+  return { startDate: start.toISOString().slice(0, 10), endDate, days };
+}
+
+export function filterReportTransactions(transactions, { type = "tous", operator = "tous", agent = "tous" } = {}) {
+  return transactions.filter((transaction) =>
+    (type === "tous" || transaction.type_operation === type)
+    && (operator === "tous" || transaction.operateur_code === operator || transaction.operateur_destination_code === operator)
+    && (agent === "tous" || transaction.agent_id === agent),
+  );
+}
+
 export function todayInAbidjan(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Africa/Abidjan",

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateCommission, calculateSession } from "./ledger.js";
+import { calculateCommission, calculateSession, filterReportTransactions, getReportDateRange } from "./ledger.js";
 
 const session = {
   id: "shift-1",
@@ -51,6 +51,28 @@ test("mesure un écart déclaré moins solde théorique à la clôture", () => {
   assert.equal(result.cashExpected, 250_000);
   assert.equal(result.cashVariance, -52_000);
   assert.equal(result.floatMap.orange.theorique, 450_000);
+});
+
+test("calcule les périodes quotidiennes, hebdomadaires et mensuelles sans décalage de fuseau", () => {
+  assert.deepEqual(getReportDateRange("2026-10-03", "day"), {
+    startDate: "2026-10-03", endDate: "2026-10-03", days: 1,
+  });
+  assert.deepEqual(getReportDateRange("2026-10-03", "week"), {
+    startDate: "2026-09-27", endDate: "2026-10-03", days: 7,
+  });
+  assert.deepEqual(getReportDateRange("2026-10-03", "month"), {
+    startDate: "2026-09-04", endDate: "2026-10-03", days: 30,
+  });
+});
+
+test("filtre le rapport par type, opérateur source/destination et agent", () => {
+  const transactions = [
+    { id: "a", type_operation: "transfert", operateur_code: "orange", operateur_destination_code: "wave", agent_id: "agent-1" },
+    { id: "b", type_operation: "depot", operateur_code: "wave", operateur_destination_code: null, agent_id: "agent-2" },
+    { id: "c", type_operation: "retrait", operateur_code: "mtn", operateur_destination_code: null, agent_id: "agent-1" },
+  ];
+  assert.deepEqual(filterReportTransactions(transactions, { operator: "wave" }).map((row) => row.id), ["a", "b"]);
+  assert.deepEqual(filterReportTransactions(transactions, { type: "transfert", agent: "agent-1" }).map((row) => row.id), ["a"]);
 });
 
 test("sélectionne le barème correspondant et calcule la commission en FCFA", () => {

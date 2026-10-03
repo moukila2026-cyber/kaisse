@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getSubscriptionState, TRIAL_DURATION_DAYS } from "./subscription.js";
+import { getSubscriptionState, PAID_PERIOD_DAYS, TRIAL_DURATION_DAYS } from "./subscription.js";
 
 test("les agences inscrites avant le trial conservent l'accès sans migration de données", () => {
   assert.deepEqual(getSubscriptionState({ id: "legacy", statut_abonnement: null }, Date.now()), {
@@ -33,8 +33,27 @@ test("un essai expiré conserve les données en lecture seule", () => {
   assert.equal(state.daysLeft, 0);
 });
 
-test("un abonnement activé manuellement débloque les écritures", () => {
+test("un abonnement activé sans échéance historique reste actif", () => {
   const state = getSubscriptionState({ statut_abonnement: "actif" }, Date.now());
   assert.equal(state.mode, "active");
   assert.equal(state.canWrite, true);
+});
+
+test("un forfait payé donne 30 jours puis repasse en lecture seule", () => {
+  const now = Date.parse("2026-10-03T12:00:00.000Z");
+  const agency = {
+    statut_abonnement: "actif",
+    plan_abonnement: "starter",
+    abonnement_termine_le: new Date(now + PAID_PERIOD_DAYS * 86_400_000).toISOString(),
+  };
+  const active = getSubscriptionState(agency, now);
+  assert.equal(active.mode, "active");
+  assert.equal(active.canWrite, true);
+  assert.equal(active.daysLeft, 30);
+  assert.equal(active.planCode, "starter");
+
+  const expired = getSubscriptionState(agency, now + PAID_PERIOD_DAYS * 86_400_000);
+  assert.equal(expired.mode, "expired");
+  assert.equal(expired.reason, "subscription");
+  assert.equal(expired.canWrite, false);
 });

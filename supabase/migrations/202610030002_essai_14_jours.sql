@@ -1,7 +1,7 @@
 -- KAISSE PRO v1.1 — essai gratuit de 14 jours, migration additive.
 -- Pré-requis : le schéma KAISSE PRO v1 (202610030001) est déjà installé.
 -- Cette migration n'efface aucune table/ligne et ne modifie pas les agences existantes.
--- Pour les agences déjà présentes, les 3 nouvelles colonnes restent NULL : elles
+-- Pour les agences déjà présentes, les nouvelles colonnes restent NULL : elles
 -- conservent donc leur accès (mode historique/grandfathered) sans période d'essai.
 
 begin;
@@ -9,7 +9,9 @@ begin;
 alter table public.agences
   add column if not exists essai_debute_le timestamptz,
   add column if not exists essai_termine_le timestamptz,
-  add column if not exists statut_abonnement text;
+  add column if not exists statut_abonnement text,
+  add column if not exists plan_abonnement text,
+  add column if not exists abonnement_termine_le timestamptz;
 
 do $$
 begin
@@ -21,6 +23,16 @@ begin
     alter table public.agences
       add constraint agences_statut_abonnement_check
       check (statut_abonnement is null or statut_abonnement in ('essai', 'actif', 'suspendu'));
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.agences'::regclass
+      and conname = 'agences_plan_abonnement_check'
+  ) then
+    alter table public.agences
+      add constraint agences_plan_abonnement_check
+      check (plan_abonnement is null or plan_abonnement in ('starter', 'pro'));
   end if;
 
   if not exists (
@@ -39,7 +51,8 @@ end;
 $$;
 
 -- Les anciennes agences dont le statut reste NULL conservent leurs droits.
--- Un statut actif correspond à un abonnement confirmé par l'exploitant.
+-- Un abonnement payé est activé manuellement sur 30 jours; une date NULL reste
+-- autorisée pour préserver d'éventuelles activations historiques.
 create or replace function public.agence_peut_ecrire(p_agence_id uuid)
 returns boolean
 language sql
@@ -54,7 +67,10 @@ as $$
       where a.id = p_agence_id
         and (
           a.statut_abonnement is null
-          or a.statut_abonnement = 'actif'
+          or (
+            a.statut_abonnement = 'actif'
+            and (a.abonnement_termine_le is null or a.abonnement_termine_le > now())
+          )
           or (a.statut_abonnement = 'essai' and a.essai_termine_le > now())
         )
     )
@@ -63,7 +79,7 @@ revoke all on function public.agence_peut_ecrire(uuid) from public, anon;
 grant execute on function public.agence_peut_ecrire(uuid) to authenticated;
 
 -- Les nouvelles agences commencent un essai de 14 jours à leur création.
--- L'inscription d'un agent rejoint l'agence existante et ne change pas son essai.
+-- L'inscription d'un gérant rejoint l'agence existante sans redémarrer son essai; Starter limite les accès gérant/agent à trois.
 create or replace function public.creer_profil_apres_inscription()
 returns trigger
 language plpgsql
@@ -77,6 +93,10 @@ declare
   v_telephone text := coalesce(new.raw_user_meta_data ->> 'telephone', '');
   v_agence_id uuid;
   v_code text;
+  v_plan text;
+  v_statut text;
+  v_essai_termine_le timestamptz;
+  v_abonnement_termine_le timestamptz;
   v_now timestamptz := now();
 begin
   if v_mode = 'creation_agence' then
@@ -84,7 +104,7 @@ begin
       raise exception 'Le nom de l''agence est obligatoire.';
     end if;
 
-    v_code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));
+    v_code := upper(translate(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8), '01', 'AB'));
     insert into public.agences (
       nom, ville, code_invitation, proprietaire_id,
       statut_abonnement, essai_debute_le, essai_termine_le
@@ -110,17 +130,31 @@ begin
       coalesce(nullif(btrim(new.raw_user_meta_data ->> 'ville'), ''), 'Daloa')
     );
   elsif v_mode = 'rejoindre_equipe' then
-    select a.id into v_agence_id
+    select a.id, a.plan_abonnement, a.statut_abonnement, a.essai_termine_le, a.abonnement_termine_le
+    into v_agence_id, v_plan, v_statut, v_essai_termine_le, v_abonnement_termine_le
     from public.agences a
     where upper(a.code_invitation) = upper(btrim(coalesce(new.raw_user_meta_data ->> 'code_invitation', '')))
-    limit 1;
+    limit 1
+    for update;
 
     if v_agence_id is null then
       raise exception 'Code d''invitation invalide.';
     end if;
+    if v_statut is not null and not (
+      (v_statut = 'actif' and (v_abonnement_termine_le is null or v_abonnement_termine_le > v_now))
+      or (v_statut = 'essai' and v_essai_termine_le > v_now)
+    ) then
+      raise exception 'La période d''accès de cette agence est terminée ou suspendue.';
+    end if;
+    if v_plan = 'starter' and (
+      select count(*) from public.profils p
+      where p.agence_id = v_agence_id and p.actif = true and p.role in ('gerant', 'agent')
+    ) >= 3 then
+      raise exception 'Le forfait Starter est limité à 3 accès gérant/agent.';
+    end if;
 
     insert into public.profils (id, agence_id, prenom, nom, telephone, role)
-    values (new.id, v_agence_id, v_prenom, v_nom, v_telephone, 'agent');
+    values (new.id, v_agence_id, v_prenom, v_nom, v_telephone, 'gerant');
   else
     raise exception 'Choisissez la création d''une agence ou le rattachement à une équipe.';
   end if;
@@ -162,7 +196,7 @@ begin
   where p.id = v_user_id and p.actif = true;
   if v_agence_id is null then raise exception 'Profil agence actif introuvable.'; end if;
   if not public.agence_peut_ecrire(v_agence_id) then
-    raise exception 'La période d''essai est terminée ou l''agence est suspendue.';
+    raise exception 'La période d''accès est terminée ou l''agence est suspendue.';
   end if;
 
   if not exists (
@@ -206,6 +240,9 @@ create policy agences_modifier_manager on public.agences
   ) with check (
     public.peut_gerer_agence(id) and public.agence_peut_ecrire(id)
   );
+-- Keep business profile edits while billing columns remain operator-only.
+revoke update on public.agences from public, anon, authenticated;
+grant update (nom, ville, code_invitation) on public.agences to authenticated;
 
 drop policy if exists profils_modifier_manager on public.profils;
 create policy profils_modifier_manager on public.profils
@@ -214,6 +251,9 @@ create policy profils_modifier_manager on public.profils
   ) with check (
     public.peut_gerer_agence(agence_id) and public.agence_peut_ecrire(agence_id)
   );
+-- Role and agency ownership columns are not writable by app users.
+revoke update on public.profils from public, anon, authenticated;
+grant update (prenom, nom, telephone, actif) on public.profils to authenticated;
 
 drop policy if exists points_ajouter_manager on public.points;
 create policy points_ajouter_manager on public.points
@@ -290,10 +330,13 @@ create policy commissions_modifier_manager on public.commission_baremes
 
 commit;
 
--- ACTIVER UN ABONNEMENT (à exécuter par l'administrateur après encaissement) :
+-- ACTIVER / RENOUVELER UN FORFAIT (à exécuter par un opérateur après paiement confirmé) :
 -- update public.agences
--- set statut_abonnement = 'actif'
+-- set statut_abonnement = 'actif',
+--     plan_abonnement = 'starter', -- ou 'pro'
+--     abonnement_termine_le = greatest(coalesce(abonnement_termine_le, now()), now()) + interval '30 days'
 -- where id = 'UUID_DE_L_AGENCE';
 --
--- IMPORTANT : ne lancez pas de UPDATE global sur statut_abonnement.
+-- Les colonnes d'abonnement ne sont pas modifiables depuis le client public.
+-- IMPORTANT : ciblez une agence précise; ne lancez jamais d'UPDATE global.
 -- Les agences existantes avec statut NULL sont volontairement laissées intactes.

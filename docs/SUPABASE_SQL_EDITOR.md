@@ -12,9 +12,9 @@ Dans Supabase : **SQL Editor → New query → coller le contenu du fichier → 
 ## Important si des personnes sont déjà inscrites
 
 - **Ne supprimez pas** les tables `agences`, `profils`, `points`, transactions ou utilisateurs Auth.
-- La migration 002 n'utilise ni `TRUNCATE`, ni `DELETE`, ni `DROP TABLE`, ni `UPDATE` global. Elle ajoute trois colonnes nullable à `agences`, ajoute des règles de sécurité et remplace les fonctions de création de compte/session.
-- Les agences présentes avant l'essai restent avec `statut_abonnement`, `essai_debute_le` et `essai_termine_le` à `NULL`. L'application les traite comme anciennes agences actives : leurs utilisateurs et données ne sont pas rétroactivement modifiés.
-- Seule la création d'une **nouvelle agence** démarre automatiquement un essai de 14 jours. Un agent rejoignant une agence hérite de son statut; il ne redémarre pas le compteur.
+- La migration 002 n'utilise ni `TRUNCATE`, ni `DELETE`, ni `DROP TABLE`, ni `UPDATE` global. Elle ajoute cinq colonnes nullable à `agences` (`essai_debute_le`, `essai_termine_le`, `statut_abonnement`, `plan_abonnement`, `abonnement_termine_le`), ajoute des règles de sécurité et remplace les fonctions de création de compte/session.
+- Les agences présentes avant l'essai gardent les nouvelles colonnes à `NULL`. L'application les traite comme anciennes agences actives : leurs utilisateurs et données ne sont pas rétroactivement modifiés.
+- Seule la création d'une **nouvelle agence** démarre automatiquement un essai de 14 jours. Un gérant rejoignant une agence hérite de son statut; il ne redémarre pas le compteur. Le forfait Starter bloque les inscriptions de gérants/agents au-delà de trois accès actifs; Pro n'impose pas de plafond dans cette V1.
 - À expiration, les nouvelles agences passent en lecture seule, mais les données ne sont pas supprimées. L'export et la clôture d'une session déjà ouverte restent accessibles. Aucun prélèvement automatique n'est activé.
 
 ### Projet déjà en production ou avec un ancien schéma
@@ -42,29 +42,44 @@ select
   statut_abonnement,
   essai_debute_le,
   essai_termine_le,
-  greatest(0, ceil(extract(epoch from (essai_termine_le - now())) / 86400))::int as jours_restants
+  plan_abonnement,
+  abonnement_termine_le,
+  greatest(0, ceil(extract(epoch from (essai_termine_le - now())) / 86400))::int as jours_essai_restants
 from public.agences
 order by created_at desc;
 ```
 
-Après création d'une nouvelle agence, le statut attendu est `essai` et la fin est quatorze jours après le début. Pour les agences préexistantes, les trois colonnes restent `NULL`.
+Après création d'une nouvelle agence, le statut attendu est `essai` et la fin est quatorze jours après le début. Pour les agences préexistantes, les nouvelles colonnes restent `NULL`.
 
-## Activer manuellement un client qui a payé
+## Activer ou renouveler manuellement un forfait payé
 
-Après encaissement et vérification de l'identifiant, activer **une agence précise** :
+Cette version ne contient pas de checkout SasPay ni de webhook. Starter est limité à trois profils actifs gérant/agent; vérifiez le nombre de membres avant activation et ne désactivez aucun compte sans accord de l'agence. Compter d'abord les accès concernés :
+
+```sql
+select count(*) as acces_gestion_actifs
+from public.profils
+where agence_id = 'UUID_DE_L_AGENCE'
+  and actif = true
+  and role in ('gerant', 'agent');
+```
+
+Après confirmation réelle du paiement et vérification de l'agence, saisir le forfait payé (`starter` ou `pro`) et ajouter une période de 30 jours :
 
 ```sql
 update public.agences
-set statut_abonnement = 'actif'
+set statut_abonnement = 'actif',
+    plan_abonnement = 'starter', -- remplacer par 'pro' si c'est le forfait payé
+    abonnement_termine_le = greatest(coalesce(abonnement_termine_le, now()), now()) + interval '30 days'
 where id = 'UUID_DE_L_AGENCE';
 ```
 
-L'application et le RLS autorisent alors les écritures. Laissez les dates de l'essai en place comme trace; ne lancez pas cet `UPDATE` sans clause `WHERE`, et ne mettez pas toutes les agences à `essai`.
+Cette commande prolonge une échéance future de 30 jours ou repart de maintenant si l'accès est déjà échu. Vérifiez l'identifiant et le paiement avant de l'exécuter; ne retirez jamais la clause `WHERE`. Les dates d'essai sont conservées comme historique. Les agences préexistantes dont `statut_abonnement` est `NULL` ne sont pas concernées par cette mise à jour.
 
-Pour vérifier avant de modifier :
+Pour vérifier avant et après :
 
 ```sql
-select id, nom, statut_abonnement, essai_termine_le
+select id, nom, statut_abonnement, essai_termine_le,
+       plan_abonnement, abonnement_termine_le
 from public.agences
 where id = 'UUID_DE_L_AGENCE';
 ```

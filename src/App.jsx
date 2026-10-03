@@ -44,9 +44,11 @@ import {
   calculateSession,
   csvCell,
   EXPENSE_CATEGORIES,
+  filterReportTransactions,
   formatDate,
   formatMoney,
   formatTime,
+  getReportDateRange,
   OPERATION_TYPES,
   todayInAbidjan,
 } from "./domain/ledger.js";
@@ -109,6 +111,12 @@ function safeAmount(value, label, allowZero = false) {
   return amount;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>\"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+  })[character]);
+}
+
 function App() {
   const [screen, setScreen] = useState("landing");
   const [page, setPage] = useState("apercu");
@@ -117,6 +125,8 @@ function App() {
   const [booting, setBooting] = useState(true);
   const [loadingDay, setLoadingDay] = useState(false);
   const [selectedDate, setSelectedDate] = useState(todayInAbidjan());
+  const [reportPeriod, setReportPeriod] = useState("day");
+  const reportRange = useMemo(() => getReportDateRange(selectedDate, reportPeriod), [selectedDate, reportPeriod]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [pointFilter, setPointFilter] = useState("tous");
   const [selectedSessionId, setSelectedSessionId] = useState("");
@@ -170,7 +180,7 @@ function App() {
     if (!authUser || screen !== "app") return undefined;
     let stillHere = true;
     setLoadingDay(true);
-    loadWorkspace(authUser.id, selectedDate)
+    loadWorkspace(authUser.id, selectedDate, reportRange)
       .then((nextWorkspace) => {
         if (stillHere) {
           setWorkspace(nextWorkspace);
@@ -184,7 +194,7 @@ function App() {
         if (stillHere) setLoadingDay(false);
       });
     return () => { stillHere = false; };
-  }, [authUser, screen, selectedDate, refreshKey]);
+  }, [authUser, screen, selectedDate, reportRange, refreshKey]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -202,6 +212,14 @@ function App() {
   const dayTransactions = useMemo(() => (workspace?.transactions || [])
     .filter((transaction) => sessionIds.has(transaction.session_id))
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [workspace, sessionIds]);
+  const reportSessions = useMemo(() => (workspace?.report_sessions || workspace?.sessions || [])
+    .filter((session) => session.date_caisse >= reportRange.startDate && session.date_caisse <= reportRange.endDate)
+    .filter((session) => pointFilter === "tous" || session.point_id === pointFilter), [workspace, reportRange, pointFilter]);
+  const reportSessionIds = useMemo(() => new Set(reportSessions.map((session) => session.id)), [reportSessions]);
+  const reportSessionDateById = useMemo(() => new Map(reportSessions.map((session) => [session.id, session.date_caisse])), [reportSessions]);
+  const reportTransactions = useMemo(() => (workspace?.report_transactions || workspace?.transactions || [])
+    .filter((transaction) => reportSessionIds.has(transaction.session_id))
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [workspace, reportSessionIds]);
   const dayExpenses = useMemo(() => (workspace?.expenses || [])
     .filter((expense) => sessionIds.has(expense.session_id))
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [workspace, sessionIds]);
@@ -261,7 +279,7 @@ function App() {
 
   function ensureCanWrite() {
     if (!subscription.canWrite) {
-      throw new Error("La période d'essai est terminée. Vos données restent consultables et exportables; contactez Kaisse pour réactiver l'accès.");
+      throw new Error("La période d'accès est terminée. Vos données restent consultables et exportables; contactez Kaisse pour réactiver l'agence.");
     }
   }
 
@@ -279,6 +297,7 @@ function App() {
         if (error) throw error;
         setAuthUser(data.user);
         setSelectedDate(todayInAbidjan());
+        setReportPeriod("day");
         setScreen("app");
         setPage("apercu");
         return;
@@ -307,6 +326,7 @@ function App() {
       if (data.session?.user) {
         setAuthUser(data.session.user);
         setSelectedDate(todayInAbidjan());
+        setReportPeriod("day");
         setScreen("app");
         setPage("apercu");
       } else {
@@ -323,6 +343,7 @@ function App() {
     setAuthUser(null);
     setWorkspace(demoWorkspace);
     setSelectedDate(demoWorkspace.sessions?.find((session) => session.statut === "ouverte")?.date_caisse || todayInAbidjan());
+    setReportPeriod("day");
     setPointFilter("tous");
     setPage("apercu");
     setScreen("app");
@@ -456,7 +477,7 @@ function App() {
   async function voidTransaction(transaction) {
     if (!isManager(workspace?.user)) return;
     if (!subscription.canWrite) {
-      setNotice({ type: "error", text: "L'essai est terminé; l'historique reste disponible en lecture seule." });
+      setNotice({ type: "error", text: "La période d'accès est terminée; l'historique reste disponible en lecture seule." });
       return;
     }
     const reason = window.prompt("Motif obligatoire de l'annulation :", "Erreur de saisie");
@@ -485,6 +506,7 @@ function App() {
     writeDemoWorkspace(fresh);
     setWorkspace(fresh);
     setSelectedDate(todayInAbidjan());
+    setReportPeriod("day");
     setPointFilter("tous");
     setSelectedSessionId("demo-session-open");
     setNotice({ type: "success", text: "La démonstration a été réinitialisée." });
@@ -523,11 +545,12 @@ function App() {
     }
   }
 
-  function exportCsv() {
+  function exportCsv(transactions = reportTransactions) {
+    const sessionById = new Map((workspace?.report_sessions || workspace?.sessions || []).map((session) => [session.id, session]));
     const rows = [
       ["Date", "Heure", "Point", "Agent", "Type", "Opérateur", "Destination", "Montant FCFA", "Commission estimée FCFA", "Commission réelle FCFA", "Référence", "Statut"],
-      ...dayTransactions.map((transaction) => [
-        selectedDate,
+      ...transactions.map((transaction) => [
+        sessionById.get(transaction.session_id)?.date_caisse || selectedDate,
         formatTime(transaction.created_at),
         pointById.get(transaction.point_id)?.nom || "",
         `${agentById.get(transaction.agent_id)?.prenom || ""} ${agentById.get(transaction.agent_id)?.nom || ""}`.trim(),
@@ -545,11 +568,45 @@ function App() {
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `kaisse-pro-${selectedDate}.csv`;
+    link.download = `kaisse-pro-${reportRange.startDate}-${reportRange.endDate}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+  }
+
+  function exportPdf(transactions = reportTransactions) {
+    const printWindow = window.open("", "_blank", "width=1000,height=760");
+    if (!printWindow) {
+      setNotice({ type: "error", text: "Autorisez les fenêtres contextuelles pour générer le PDF." });
+      return;
+    }
+    const sessionById = new Map((workspace?.report_sessions || workspace?.sessions || []).map((session) => [session.id, session]));
+    const valid = transactions.filter((transaction) => !transaction.annulee_le);
+    const totalVolume = valid.reduce((sum, transaction) => sum + Number(transaction.montant || 0), 0);
+    const totalCommissions = valid.reduce((sum, transaction) => sum + Number(transaction.commission_reelle ?? transaction.commission_estimee ?? 0), 0);
+    const bodyRows = transactions.map((transaction) => {
+      const session = sessionById.get(transaction.session_id);
+      const agent = agentById.get(transaction.agent_id);
+      const operator = operatorByCode.get(transaction.operateur_code);
+      const destination = operatorByCode.get(transaction.operateur_destination_code);
+      const canceled = Boolean(transaction.annulee_le);
+      const commission = transaction.commission_reelle ?? transaction.commission_estimee;
+      const commissionEstimated = transaction.commission_reelle == null;
+      return `<tr class="${canceled ? "cancelled" : ""}"><td>${escapeHtml(formatDate(session?.date_caisse || selectedDate))}</td><td>${escapeHtml(formatTime(transaction.created_at))}</td><td>${escapeHtml(OPERATION_LABELS[transaction.type_operation] || transaction.type_operation)}${destination ? ` → ${escapeHtml(destination.nom)}` : ""}</td><td>${escapeHtml(operator?.nom || transaction.operateur_code)}</td><td class="num">${escapeHtml(formatMoney(transaction.montant))}</td><td class="num">${escapeHtml(formatMoney(commission))}${commissionEstimated ? " <small>(estimée)</small>" : ""}</td><td>${escapeHtml(`${agent?.prenom || ""} ${agent?.nom || ""}`.trim() || "Agent")}</td><td>${escapeHtml(transaction.reference || "—")}</td><td>${canceled ? `Annulée — ${escapeHtml(transaction.motif_annulation || "")}` : "Validée"}</td></tr>`;
+    }).join("");
+    const periodLabel = reportRange.startDate === reportRange.endDate
+      ? formatDate(reportRange.endDate)
+      : `${formatDate(reportRange.startDate)} — ${formatDate(reportRange.endDate)}`;
+    const selectedPoint = pointFilter === "tous" ? "Tous les points" : pointById.get(pointFilter)?.nom || "Point";
+    const printDocument = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Rapport Kaisse — ${escapeHtml(periodLabel)}</title><style>
+      *{box-sizing:border-box}body{font:12px Arial,sans-serif;color:#182f38;margin:28px}h1{font-size:22px;margin:0 0 4px}p{color:#637379;margin:4px 0 18px}.summary{display:flex;gap:20px;padding:12px 14px;background:#f3f6f2;border-radius:8px;margin-bottom:18px}.summary strong{display:block;font-size:15px;margin-top:4px}table{border-collapse:collapse;width:100%;font-size:9px}th{text-align:left;background:#17333d;color:#fff;padding:8px 6px}td{padding:7px 6px;border-bottom:1px solid #e7eae6;vertical-align:top}.num{text-align:right;white-space:nowrap}.cancelled{color:#8d594c;background:#fff8f4}small{color:#8c7a53}footer{margin-top:18px;padding-top:9px;border-top:1px solid #ddd;color:#6e7d81;font-size:9px}@page{size:landscape;margin:12mm}@media print{body{margin:0}button{display:none}}
+      </style></head><body><h1>Kaisse — rapport des opérations</h1><p>${escapeHtml(agency.nom)} · ${escapeHtml(periodLabel)} · ${escapeHtml(selectedPoint)} · filtres période/type/opérateur/agent appliqués</p><div class="summary"><div>Opérations validées<strong>${valid.length}</strong></div><div>Volume validé<strong>${escapeHtml(formatMoney(totalVolume))}</strong></div><div>Commissions déclarées/estimées<strong>${escapeHtml(formatMoney(totalCommissions))}</strong></div><div>Lignes exportées<strong>${transactions.length}</strong></div></div><table><thead><tr><th>Date</th><th>Heure</th><th>Type</th><th>Opérateur</th><th>Montant</th><th>Commission</th><th>Agent</th><th>Référence</th><th>Statut</th></tr></thead><tbody>${bodyRows || `<tr><td colspan="9">Aucune opération pour cette sélection.</td></tr>`}</tbody></table><footer>Rapport généré par Kaisse. Les montants proviennent des saisies manuelles de l'agence et ne sont pas vérifiés par une API opérateur.</footer></body></html>`;
+    printWindow.document.open();
+    printWindow.document.write(printDocument);
+    printWindow.document.close();
+    printWindow.focus();
+    window.setTimeout(() => printWindow.print(), 250);
   }
 
   if (booting) return <div className="boot-screen"><div className="brand-mark"><Wallet size={20} /></div><span>Préparation de KAISSE PRO…</span></div>;
@@ -625,7 +682,7 @@ function App() {
           <div className="topbar-controls">
             {workspace?.demo && <span className="demo-pill"><span /> DÉMO</span>}
             {subscription.mode === "trial" && <span className="trial-pill"><span /> Essai · {subscription.daysLeft} j</span>}
-            {subscription.mode === "active" && <span className="paid-pill"><CheckCircle2 size={13} /> Abonnement actif</span>}
+            {subscription.mode === "active" && <span className="paid-pill"><CheckCircle2 size={13} />{subscription.planCode ? `${subscription.planCode === "starter" ? "Starter" : "Pro"} · ` : ""}{subscription.daysLeft == null ? "Abonnement actif" : `${subscription.daysLeft} j restants`}</span>}
             <label className="date-control"><CalendarDays size={15} /><input aria-label="Date de consultation" type="date" value={selectedDate} max={todayInAbidjan()} onChange={(event) => setSelectedDate(event.target.value)} /></label>
             <label className="point-control"><MapPin size={15} /><select value={pointFilter} onChange={(event) => setPointFilter(event.target.value)}><option value="tous">Tous les points</option>{visiblePoints.map((point) => <option value={point.id} key={point.id}>{point.nom}</option>)}</select></label>
             <button className="icon-button top-logout" title="Se déconnecter" onClick={signOut}><LogOut size={17} /></button>
@@ -635,9 +692,9 @@ function App() {
         {notice && <div className={`notice ${notice.type}`} role="status"><span>{notice.text}</span><button className="notice-close" onClick={() => setNotice(null)} aria-label="Fermer"><X size={15} /></button></div>}
         {workspace?.demo && <div className="demo-banner"><AlertTriangle size={16} /><span>{DEMO_WARNING}</span><button onClick={resetDemo}>Réinitialiser</button></div>}
         {workspace && subscription.mode === "trial" && <div className="trial-banner"><Clock3 size={16} /><div><strong>Essai gratuit · {subscription.daysLeft} jour{subscription.daysLeft > 1 ? "s" : ""} restant{subscription.daysLeft > 1 ? "s" : ""}</strong><span>Accès complet pendant 14 jours à compter de la création de l'agence. Aucun prélèvement automatique n'est effectué par cette V1.</span></div></div>}
-        {workspace && subscription.mode === "expired" && <div className="trial-banner expired"><LockKeyhole size={16} /><div><strong>Votre période d'essai est terminée</strong><span>Vos données, rapports et exports sont conservés en lecture seule. La clôture d'une session déjà ouverte reste possible; contactez Kaisse pour réactiver votre agence.</span></div></div>}
+        {workspace && subscription.mode === "expired" && <div className="trial-banner expired"><LockKeyhole size={16} /><div><strong>{subscription.reason === "subscription" ? "Votre période payée est terminée" : "Votre période d'essai est terminée"}</strong><span>Vos données, rapports et exports sont conservés en lecture seule. La clôture d'une session déjà ouverte reste possible; contactez Kaisse pour réactiver votre agence.</span></div></div>}
         {workspace && subscription.mode === "suspended" && <div className="trial-banner expired"><LockKeyhole size={16} /><div><strong>Accès en lecture seule</strong><span>Vos données sont conservées. Contactez Kaisse pour réactiver votre abonnement.</span></div></div>}
-        {loadingDay && <div className="loading-line"><span /> Chargement des données de la journée…</div>}
+        {loadingDay && <div className="loading-line"><span /> Chargement des données de l'agence et du rapport…</div>}
         {authUser && !workspace && <div className="loading-workspace"><div className="spinner" /><strong>Chargement de votre agence</strong><span>Nous récupérons vos points, sessions et opérations.</span></div>}
 
         {workspace && page === "apercu" && (
@@ -676,15 +733,20 @@ function App() {
         {workspace && page === "operations" && (
           <OperationsPage
             date={selectedDate}
-            transactions={dayTransactions}
+            reportRange={reportRange}
+            period={reportPeriod}
+            onPeriodChange={setReportPeriod}
+            transactions={reportTransactions}
+            sessionDateById={reportSessionDateById}
             operators={operatorByCode}
             points={pointById}
             agents={agentById}
-            sessionCount={daySessions.length}
+            sessionCount={reportSessions.length}
             canManage={canManage}
             canWrite={subscription.canWrite}
             onOpenModal={setModal}
             onExport={exportCsv}
+            onExportPdf={exportPdf}
             onCancel={voidTransaction}
           />
         )}
@@ -737,6 +799,7 @@ function App() {
           <SettingsPage
             agency={agency}
             user={user}
+            subscription={subscription}
             operators={operatorOrder}
             rules={workspace.commission_baremes || []}
             onOpenModal={setModal}
@@ -841,11 +904,19 @@ function LandingPage({ onDemo, onLogin }) {
           <FeatureCard icon={HandCoins} number="02" title="Voir les commissions" text="Barèmes configurables par agence ou saisie manuelle. Estimé et montant réel restent séparés." />
           <FeatureCard icon={ShieldCheck} number="03" title="Rapprocher la caisse" text="Déclarez les espèces et chaque solde électronique à l'ouverture et à la fermeture." />
           <FeatureCard icon={Users} number="04" title="Suivre les agents" text="Chaque session et chaque opération sont associées à un profil et à un point." />
-          <FeatureCard icon={FileText} number="05" title="Partager le rapport" text="Export CSV ou rapport texte partageable sur WhatsApp. L'envoi est déclenché par le gérant." />
+          <FeatureCard icon={FileText} number="05" title="Partager le rapport" text="Export CSV ou PDF imprimable avec filtres de période, type, opérateur et gérant." />
           <FeatureCard icon={AlertTriangle} number="06" title="Repérer un écart" text="Le montant déclaré moins le théorique est affiché avec un signe clair et un motif à vérifier." />
         </div>
       </section>
 
+      <section className="landing-pricing">
+        <div className="section-heading"><span>OFFRES KAISSE</span><h2>Un tarif clair, sans prélèvement automatique.</h2><p>Choisissez une formule après les 14 jours d'essai gratuit de votre nouvelle agence.</p></div>
+        <div className="pricing-grid">
+          <article className="pricing-card"><div className="pricing-tag">JUSQU'À 3 AGENTS</div><h3>Starter</h3><p>Pour une petite équipe qui veut fiabiliser sa clôture.</p><div className="pricing-price">10 000 <span>FCFA / 30 jours</span></div><ul><li><Check size={14} />Journal et rapprochement</li><li><Check size={14} />Exports CSV et PDF filtrés</li><li><Check size={14} />Jusqu'à 3 agents</li></ul></article>
+          <article className="pricing-card featured"><div className="pricing-tag">ÉQUIPE ÉTENDUE</div><h3>Pro</h3><p>Pour les agences avec plusieurs agents et un suivi renforcé.</p><div className="pricing-price">25 000 <span>FCFA / 30 jours</span></div><ul><li><Check size={14} />Tous les modules Kaisse</li><li><Check size={14} />Exports CSV et PDF filtrés</li><li><Check size={14} />Agents illimités</li></ul></article>
+        </div>
+        <p className="pricing-note">Essai de 14 jours, puis règlement SasPay par période de 30 jours, sans renouvellement automatique. Le paiement et l'activation restent manuels dans cette version; aucun encaissement n'est déclenché depuis l'application.</p>
+      </section>
       <section className="landing-cta"><div><span className="eyebrow">DÉMO INTERACTIVE</span><h2>Testez l'application, puis essayez-la 14 jours.</h2><p>La démo ne demande aucun compte. Le nouvel espace d'agence dispose de 14 jours d'essai; les données restent conservées ensuite en lecture seule si l'accès n'est pas réactivé.</p></div><button className="button button-paper button-large" onClick={onDemo}>Ouvrir la démo <ArrowRight size={17} /></button></section>
       <footer className="landing-footer"><span>© 2026 Kaisse Pro · Côte d'Ivoire</span><span>Outil de suivi manuel — ne remplace pas les relevés opérateurs.</span></footer>
     </main>
@@ -872,7 +943,7 @@ function AuthPage({ configured, error, message, onSubmit, onDemo, onBack }) {
       if (!form.nom.trim() || !form.prenom.trim()) return setLocalError("Renseignez votre nom et votre prénom.");
       if (kind === "creation_agence" && !form.nom_agence.trim()) return setLocalError("Renseignez le nom de l'agence.");
       if (kind === "rejoindre_equipe" && !form.code_invitation.trim()) return setLocalError("Renseignez le code transmis par le propriétaire.");
-      if (form.password.length < 8) return setLocalError("Le mot de passe doit contenir au moins 8 caractères.");
+      if (form.password.length < 6) return setLocalError("Le mot de passe doit contenir au moins 6 caractères.");
     }
     if (!configured) return setLocalError("Configurez Supabase avec les variables d'environnement pour créer un vrai compte. La démo reste disponible.");
     setLoading(true);
@@ -899,13 +970,14 @@ function AuthPage({ configured, error, message, onSubmit, onDemo, onBack }) {
           {mode === "inscription" && kind === "creation_agence" && <div className="trial-info"><Clock3 size={14} />14 jours d'essai pour une nouvelle agence. Les agences déjà inscrites ne sont pas modifiées; après l'essai, vos données restent consultables.</div>}
 
           {mode === "inscription" && <div className="join-choice"><button className={kind === "creation_agence" ? "active" : ""} onClick={() => setKind("creation_agence")}><Store size={15} /> Créer une agence</button><button className={kind === "rejoindre_equipe" ? "active" : ""} onClick={() => setKind("rejoindre_equipe")}><Users size={15} /> Rejoindre</button></div>}
+          {mode === "inscription" && kind === "rejoindre_equipe" && <div className="trial-info"><Users size={14} />Vous rejoindrez cette agence avec le rôle de gérant, avec votre propre compte.</div>}
           <form onSubmit={submit} className="auth-form">
             {mode === "inscription" && <div className="form-row"><FormField label="Prénom"><input autoComplete="given-name" value={form.prenom} onChange={setValue("prenom")} /></FormField><FormField label="Nom"><input autoComplete="family-name" value={form.nom} onChange={setValue("nom")} /></FormField></div>}
             {mode === "inscription" && <FormField label="Téléphone (facultatif)"><input autoComplete="tel" type="tel" placeholder="07 00 00 00 00" value={form.telephone} onChange={setValue("telephone")} /></FormField>}
             {mode === "inscription" && kind === "creation_agence" && <><FormField label="Nom de l'agence"><input value={form.nom_agence} onChange={setValue("nom_agence")} placeholder="Ex. Agence Centre Daloa" /></FormField><div className="form-row"><FormField label="Ville"><input value={form.ville} onChange={setValue("ville")} /></FormField><FormField label="Premier point"><input value={form.premier_point} onChange={setValue("premier_point")} /></FormField></div></>}
-            {mode === "inscription" && kind === "rejoindre_equipe" && <FormField label="Code d'invitation"><input autoCapitalize="characters" value={form.code_invitation} onChange={setValue("code_invitation")} placeholder="Ex. 4A1C9F02" /></FormField>}
+            {mode === "inscription" && kind === "rejoindre_equipe" && <FormField label="Code d'invitation" hint="Utilisez le code exact transmis par le propriétaire; les nouveaux codes font 8 caractères et évitent 0/O/1/I/L."><input autoCapitalize="characters" autoComplete="off" value={form.code_invitation} onChange={setValue("code_invitation")} placeholder="Ex. KSSPAB26" /></FormField>}
             <FormField label="Adresse email"><input autoComplete="email" type="email" value={form.email} onChange={setValue("email")} placeholder="vous@exemple.ci" /></FormField>
-            <FormField label="Mot de passe"><input autoComplete={mode === "connexion" ? "current-password" : "new-password"} type="password" value={form.password} onChange={setValue("password")} placeholder={mode === "inscription" ? "8 caractères minimum" : "Votre mot de passe"} /></FormField>
+            <FormField label="Mot de passe"><input autoComplete={mode === "connexion" ? "current-password" : "new-password"} type="password" value={form.password} onChange={setValue("password")} placeholder={mode === "inscription" ? "6 caractères minimum" : "Votre mot de passe"} /></FormField>
             {(localError || error) && <div className="form-alert error"><AlertTriangle size={15} />{localError || error}</div>}
             {message && <div className="form-alert success"><CheckCircle2 size={15} />{message}</div>}
             {!configured && <div className="config-hint"><LockKeyhole size={15} />Mode connecté indisponible tant que Supabase n'est pas configuré.</div>}
@@ -1013,25 +1085,74 @@ function BalanceLine({ icon: Icon, operator, label, amount, declared, variance, 
   return <div className="balance-line"><div className="balance-label">{operator ? <span className="operator-dot" style={{ "--operator-color": operator.couleur }} /> : <span className="balance-icon"><Icon size={15} /></span>}<span>{label}</span></div><div className="balance-amounts"><strong>{formatMoney(amount)}</strong>{closed && <span className={variance === 0 ? "variance zero" : "variance"}>Déclaré {formatMoney(declared)} · {variance > 0 ? "+" : ""}{formatMoney(variance)}</span>}</div></div>;
 }
 
-function OperationsPage({ date, transactions, operators, points, agents, sessionCount, canManage, canWrite, onOpenModal, onExport, onCancel }) {
+function OperationsPage({ date, reportRange, period, onPeriodChange, transactions, sessionDateById, operators, points, agents, sessionCount, canManage, canWrite, onOpenModal, onExport, onExportPdf, onCancel }) {
+  const [typeFilter, setTypeFilter] = useState("tous");
+  const [operatorFilter, setOperatorFilter] = useState("tous");
+  const [agentFilter, setAgentFilter] = useState("tous");
+  const operatorOptions = Array.from(operators.values());
+  const agentOptions = Array.from(new Set(transactions.map((transaction) => transaction.agent_id)))
+    .map((id) => agents.get(id))
+    .filter(Boolean);
+  const filteredRows = filterReportTransactions(transactions, {
+    type: typeFilter,
+    operator: operatorFilter,
+    agent: agentFilter,
+  });
+  const validRows = filteredRows.filter((transaction) => !transaction.annulee_le);
+  const volume = validRows.reduce((sum, transaction) => sum + Number(transaction.montant || 0), 0);
+  const periodLabel = reportRange.startDate === reportRange.endDate
+    ? formatDate(reportRange.endDate)
+    : `${formatDate(reportRange.startDate)} — ${formatDate(reportRange.endDate)}`;
+
   return (
     <main className="content-area">
-      <PageHeading eyebrow={`JOURNAL · ${formatDate(date)}`} title="Opérations" description="Une ligne par mouvement, rattachée à une session, un point et un agent." actions={<><button className="button button-outline" onClick={onExport}><Download size={16} />Exporter CSV</button>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}><Plus size={16} />Nouvelle opération</button>}</>} />
-      <div className="section-stats"><div><span>Sessions ouvertes ou clôturées</span><strong>{sessionCount}</strong></div><div><span>Lignes du journal</span><strong>{transactions.length}</strong></div><div><span>Opérations validées</span><strong>{transactions.filter((row) => !row.annulee_le).length}</strong></div><div><span>Commissions à vérifier</span><strong>{transactions.filter((row) => !row.annulee_le && row.commission_reelle == null).length}</strong></div></div>
-      <section className="panel table-panel"><div className="panel-heading"><div><h2>Journal des transactions</h2><p>Les opérations annulées restent visibles et ne sont plus comptées dans les soldes théoriques.</p></div>{canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Ajouter une dépense</button>}</div>{transactions.length ? <TransactionTable rows={transactions} operators={operators} points={points} agents={agents} canManage={canManage && canWrite} onCancel={onCancel} /> : <div className="empty-state"><ReceiptText size={25} /><strong>Le journal est vide pour cette date.</strong><span>Ouvrez une session de caisse, puis saisissez le premier dépôt ou retrait.</span>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}>Ajouter une opération</button>}</div>}</section>
-      <div className="ledger-footnote"><ShieldCheck size={17} /><span>Le journal est manuel : vérifiez les reçus opérateurs. Kaisse Pro ne déclenche pas de dépôt, retrait ou transfert.</span></div>
+      <PageHeading
+        eyebrow={`JOURNAL · ${periodLabel}`}
+        title="Opérations"
+        description="Filtrez le journal par période, type, opérateur et agent avant d'exporter le rapport."
+        actions={<>
+          <button className="button button-outline" onClick={() => onExport(filteredRows)}><Download size={16} />CSV</button>
+          <button className="button button-outline" onClick={() => onExportPdf(filteredRows)}><FileText size={16} />PDF</button>
+          {canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}><Plus size={16} />Nouvelle opération</button>}
+        </>}
+      />
+      <section className="filter-toolbar" aria-label="Filtres du journal">
+        <div className="filter-heading"><span className="filter-icon"><CalendarDays size={15} /></span><div><strong>Filtrer le rapport</strong><small>Fin : {formatDate(date)} · {points.size ? "point choisi dans la barre supérieure" : "tous les points"}</small></div></div>
+        <label><span>Période</span><select value={period} onChange={(event) => onPeriodChange(event.target.value)}><option value="day">Jour sélectionné</option><option value="week">7 derniers jours</option><option value="month">30 derniers jours</option></select></label>
+        <label><span>Type</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="tous">Tous les types</option>{OPERATION_TYPES.map((item) => <option key={item.code} value={item.code}>{item.label}</option>)}</select></label>
+        <label><span>Opérateur</span><select value={operatorFilter} onChange={(event) => setOperatorFilter(event.target.value)}><option value="tous">Tous les opérateurs</option>{operatorOptions.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></label>
+        <label><span>Gérant / agent</span><select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="tous">Toute l'équipe</option>{agentOptions.map((agent) => <option key={agent.id} value={agent.id}>{agent.prenom} {agent.nom}</option>)}</select></label>
+      </section>
+      <div className="section-stats">
+        <div><span>Sessions de la période</span><strong>{sessionCount}</strong></div>
+        <div><span>Lignes filtrées</span><strong>{filteredRows.length}</strong></div>
+        <div><span>Volume validé</span><strong>{formatMoney(volume)}</strong></div>
+        <div><span>Commissions à vérifier</span><strong>{validRows.filter((row) => row.commission_reelle == null).length}</strong></div>
+      </div>
+      <section className="panel table-panel">
+        <div className="panel-heading">
+          <div><h2>Journal des transactions</h2><p>Les lignes annulées restent visibles mais ne contribuent pas aux soldes ni aux totaux validés.</p></div>
+          {canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Ajouter une dépense</button>}
+        </div>
+        {filteredRows.length ? (
+          <TransactionTable rows={filteredRows} operators={operators} points={points} agents={agents} canManage={canManage && canWrite} onCancel={onCancel} showDate sessionDateById={sessionDateById} />
+        ) : (
+          <div className="empty-state"><ReceiptText size={25} /><strong>Aucune opération ne correspond à ces filtres.</strong><span>Modifiez la période ou les filtres, ou ouvrez une session pour saisir un premier mouvement.</span>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}>Ajouter une opération</button>}</div>
+        )}
+      </section>
+      <div className="ledger-footnote"><ShieldCheck size={17} /><span>Le journal est manuel : vérifiez les reçus opérateurs. Kaisse ne déclenche pas de dépôt, retrait ou transfert.</span></div>
     </main>
   );
 }
-
-function TransactionTable({ rows, operators, points, agents, canManage, onCancel, compact = false }) {
-  return <div className="table-scroll"><table className={`data-table ${compact ? "compact-table" : ""}`}><thead><tr><th>Heure</th><th>Opération</th><th>Opérateur</th><th>Montant</th><th>Commission</th><th>Agent · point</th><th>Référence</th>{canManage && <th />}</tr></thead><tbody>{rows.map((transaction) => {
+function TransactionTable({ rows, operators, points, agents, canManage, onCancel, compact = false, showDate = false, sessionDateById = new Map() }) {
+  return <div className="table-scroll"><table className={`data-table ${compact ? "compact-table" : ""}`}><thead><tr>{showDate && <th>Date</th>}<th>Heure</th><th>Opération</th><th>Opérateur</th><th>Montant</th><th>Commission</th><th>Agent · point</th><th>Référence</th>{canManage && <th />}</tr></thead><tbody>{rows.map((transaction) => {
     const operator = operators.get(transaction.operateur_code);
     const destination = transaction.operateur_destination_code ? operators.get(transaction.operateur_destination_code) : null;
     const agent = agents.get(transaction.agent_id);
     const canceled = Boolean(transaction.annulee_le);
     const commission = transaction.commission_reelle == null ? null : Number(transaction.commission_reelle);
     return <tr key={transaction.id} className={canceled ? "cancelled-row" : ""}>
+      {showDate && <td>{formatDate(sessionDateById.get(transaction.session_id))}</td>}
       <td className="time-cell">{formatTime(transaction.created_at)}</td>
       <td><div className="operation-cell"><strong>{OPERATION_LABELS[transaction.type_operation] || transaction.type_operation}</strong>{destination && <small>Vers {destination.nom}</small>}{canceled && <small className="cancel-note">Annulée · {transaction.motif_annulation}</small>}</div></td>
       <td><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator?.couleur || "#95a0a6" }} />{operator?.nom || transaction.operateur_code}</span></td>
@@ -1076,7 +1197,7 @@ function TeamPage({ agency, user, profiles, points, sessions, summaries, canMana
   return (
     <main className="content-area">
       <PageHeading eyebrow="ORGANISATION" title="Équipe & points" description="Un profil agent par personne; chaque opération est rattachée à sa session." actions={canManage && canWrite && <button className="button button-dark" onClick={() => onOpenModal("point")}><Plus size={16} />Ajouter un point</button>} />
-      {canManage && canWrite && <section className="invite-card"><div className="invite-icon"><Users size={19} /></div><div className="invite-copy"><span>INVITER UN AGENT</span><h2>Partagez le code de votre agence.</h2><p>L'agent crée son accès avec son propre email et choisit « Rejoindre une équipe ». Ne partagez jamais votre mot de passe.</p></div><div className="invite-code"><small>CODE D'INVITATION</small><strong>{agency.code_invitation || "—"}</strong><button className="button button-paper" onClick={onCopyCode}><Copy size={15} />Copier</button></div></section>}
+      {canManage && canWrite && <section className="invite-card"><div className="invite-icon"><Users size={19} /></div><div className="invite-copy"><span>INVITER UN GÉRANT</span><h2>Partagez le code de votre agence.</h2><p>Le gérant crée son accès avec son propre email et choisit « Rejoindre une équipe ». Ne partagez jamais votre mot de passe.</p></div><div className="invite-code"><small>CODE D'INVITATION</small><strong>{agency.code_invitation || "—"}</strong><button className="button button-paper" onClick={onCopyCode}><Copy size={15} />Copier</button></div></section>}
       <div className="team-columns"><section className="panel team-panel"><div className="panel-heading"><div><h2>Membres de l'équipe</h2><p>{profiles.length} profil{profiles.length > 1 ? "s" : ""} actif{profiles.length > 1 ? "s" : ""}</p></div><Users size={19} className="panel-heading-icon" /></div>{profiles.length ? <div className="team-list">{profiles.map((profile) => { const session = openByAgent.get(profile.id); const point = session && points.find((item) => item.id === session.point_id); return <div className="team-member" key={profile.id}><div className="avatar small-avatar">{getInitials(profile)}</div><div className="team-member-name"><strong>{profile.prenom} {profile.nom}</strong><span>{profile.role === "proprietaire" ? "Propriétaire" : profile.role === "gerant" ? "Gérant" : "Agent"}{profile.telephone ? ` · ${profile.telephone}` : ""}</span></div><div className={`member-session ${session ? "online" : "offline"}`}><span />{session ? `En session · ${point?.nom || "Point"}` : "Pas de session ouverte"}</div></div>; })}</div> : <div className="empty-inline">Aucun profil visible pour votre compte.</div>}</section>
         <section className="panel points-panel"><div className="panel-heading"><div><h2>Points de vente</h2><p>{points.length} point{points.length > 1 ? "s" : ""} configuré{points.length > 1 ? "s" : ""}</p></div><Building2 size={19} className="panel-heading-icon" /></div>{points.length ? <div className="points-list">{points.map((point) => { const opened = sessions.filter((session) => session.point_id === point.id && session.statut === "ouverte").length; const pointSessions = summaries.filter(({ session }) => session.point_id === point.id); const balance = pointSessions.reduce((sum, { session, totals }) => sum + (session.statut === "ouverte" ? totals.floatExpected : Number(totals.floatDeclared || 0)), 0); return <div className="point-row" key={point.id}><div className="point-icon"><Store size={16} /></div><div className="point-meta"><strong>{point.nom}</strong><span><MapPin size={12} />{point.ville || agency.ville}</span></div><div className="point-live"><strong>{formatMoney(balance)}</strong><span>{opened ? `${opened} session${opened > 1 ? "s" : ""} en cours` : "Aucune session active"}</span></div></div>; })}</div> : <div className="empty-inline">Créez votre premier point pour ouvrir une session de caisse.</div>}{canManage && canWrite && <button className="add-point-row" onClick={() => onOpenModal("point")}><Plus size={15} />Ajouter un point de vente</button>}</section></div>
       {!canManage && <div className="ledger-footnote"><LockKeyhole size={16} /><span>Seuls le propriétaire et les gérants peuvent voir toute l'équipe et gérer les points.</span></div>}
@@ -1084,7 +1205,22 @@ function TeamPage({ agency, user, profiles, points, sessions, summaries, canMana
   );
 }
 
-function SettingsPage({ agency, user, operators, rules, onOpenModal, onResetDemo, canManage, canWrite }) {
+function SettingsPage({ agency, user, subscription, operators, rules, onOpenModal, onResetDemo, canManage, canWrite }) {
+  const planLabel = agency.plan_abonnement === "starter"
+    ? "Starter · 10 000 FCFA / 30 jours"
+    : agency.plan_abonnement === "pro"
+      ? "Pro · 25 000 FCFA / 30 jours"
+      : subscription.mode === "trial"
+        ? "Essai gratuit · 14 jours"
+        : subscription.mode === "legacy"
+          ? "Accès historique"
+          : subscription.mode === "suspended"
+            ? "Suspendu"
+            : "Aucun forfait enregistré";
+  const endDateLabel = subscription.end
+    ? new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeZone: "Africa/Abidjan" }).format(new Date(subscription.end))
+    : "—";
+
   return (
     <main className="content-area">
       <PageHeading
@@ -1104,9 +1240,12 @@ function SettingsPage({ agency, user, operators, rules, onOpenModal, onResetDemo
           <SettingRow label="Agence" value={agency.nom || "—"} />
           <SettingRow label="Ville" value={agency.ville || "—"} />
           <SettingRow label="Devise" value="Franc CFA (XOF)" />
+          <SettingRow label="Offre" value={planLabel} />
+          <SettingRow label="Accès jusqu'au" value={endDateLabel} />
           <SettingRow label="Profil connecté" value={`${user.prenom || ""} ${user.nom || ""} · ${user.role || "agent"}`} />
           <SettingRow label="Code équipe" value={agency.code_invitation || "—"} />
-          <div className="settings-note"><ShieldCheck size={16} />Le code d'équipe donne accès à l'inscription comme agent. Gardez-le dans le cercle de l'agence.</div>
+          <div className="settings-note"><ShieldCheck size={16} />Le code d'équipe permet à un gérant de rejoindre l'agence avec son propre compte. Gardez-le dans le cercle de confiance.</div>
+          {agency.statut_abonnement && <div className="settings-note"><Clock3 size={16} />Les périodes payantes sont de 30 jours, sans renouvellement automatique. La validation du paiement et l'activation du forfait restent manuelles dans cette version.</div>}
         </section>
 
         <section className="panel rules-panel">

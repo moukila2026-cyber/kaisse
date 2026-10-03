@@ -14,8 +14,8 @@ Le produit **n'est pas** une application grand public et **n'est pas** un portef
 
 ### Inclus
 
-1. **Espace d'agence** : création d'une agence, ville, premier point et code d'invitation.
-2. **Profils et rôles** : propriétaire, gérant, agent. Un agent rejoint avec un code d'agence et son propre compte; il ne reçoit pas le mot de passe du propriétaire.
+1. **Espace d'agence** : inscription du propriétaire, création d'une agence, ville, premier point et code d'invitation à 8 caractères sans `0/O/1/I/L`.
+2. **Profils et rôles** : propriétaire, gérant, agent. Le propriétaire crée l'espace; le gérant invité rejoint avec son propre compte au moyen d'un code d'invitation de 8 caractères sans `0/O/1/I/L`. Le mot de passe de création accepte 6 caractères minimum; il ne reçoit pas celui du propriétaire.
 3. **Points de vente** : création d'un point avec nom, ville et seuil de float configuré.
 4. **Ouverture de session** : point, agent connecté, espèces réellement comptées et solde de départ Orange Money, MTN MoMo, Moov Money et Wave.
 5. **Transactions manuelles** :
@@ -28,7 +28,7 @@ Le produit **n'est pas** une application grand public et **n'est pas** un portef
 7. **Dépenses** : catégorie, montant et moyen de paiement (espèces ou portefeuille opérateur). Le moyen choisi détermine quel solde théorique est diminué.
 8. **Clôture** : l'agent déclare les espèces comptées et les quatre soldes lus sur les comptes/appareils opérateur. La comparaison est faite par solde, puis additionnée pour un total de float.
 9. **Tableau de bord journalier** : volume d'opérations, nombre de lignes, commissions déclarées/estimées, dépenses, résultat indicatif, état de la session, volumes par opérateur et écarts des clôtures.
-10. **Rapport** : partage manuel du rapport texte (feuille de partage du téléphone ou lien WhatsApp) et export CSV. Aucun envoi planifié WhatsApp en V1.
+10. **Rapport** : partage manuel du rapport texte, export CSV ou PDF imprimable; filtres période (jour/7/30 jours), type, opérateur et agent. Aucun envoi planifié WhatsApp en V1.
 11. **Journal d'audit minimal** : pas de suppression physique d'une transaction. Un propriétaire/gérant peut annuler une ligne avec un motif; la ligne reste visible, mais ne contribue plus aux soldes.
 12. **Alertes déterministes** : écart déclaré/théorique non nul, commission réelle manquante, float sous le seuil configuré. Pas d'intelligence artificielle ni de détection de fraude.
 
@@ -74,7 +74,7 @@ Un transfert ne modifie pas les espèces. Les commissions ne sont **pas** automa
 | Accueil | Proposition de valeur, périmètre manuel explicite, opérateurs, démo | Essayer la démo / se connecter |
 | Connexion & inscription | Connexion, création d'agence, ou rejoindre une agence par code | Ouvrir un compte Supabase |
 | Vue d'ensemble | Date/point/session, KPIs du jour, opérations par opérateur, soldes théoriques, dernières lignes, clôtures en écart | Nouvelle opération / ouvrir caisse / rapport |
-| Opérations | Journal, commissions estimées/réelles, annulation motivée pour manager, export CSV | Dépôt, retrait, transfert, crédit, dépense |
+| Opérations | Journal filtrable par période, type, opérateur et agent; commissions estimées/réelles; annulation motivée pour manager; export CSV ou PDF imprimable | Dépôt, retrait, transfert, crédit, dépense |
 | Caisse & clôture | Sélecteur de session, ouverture, soldes théoriques, montants déclarés, dépenses, explication de l'écart | Ouvrir, saisir dépense, clôturer |
 | Équipe & points | Membres visibles selon le rôle, statut de session, points de vente, code d'invitation | Copier code / ajouter un point |
 | Réglages | Profil/agence, règles de commissions, source du barème, avertissement sur les estimations | Ajouter une tranche de barème |
@@ -84,7 +84,7 @@ Un transfert ne modifie pas les espèces. Les commissions ne sont **pas** automa
 
 ### Parcours nominal (agent)
 
-1. Rejoint l'agence avec son compte et le code d'invitation.
+1. Le gérant rejoint l'agence avec son compte et le code d'invitation; le propriétaire conserve un compte séparé.
 2. Sélectionne son point et déclare les cinq soldes au début de la journée.
 3. Saisit chaque opération juste après l'avoir effectuée et les dépenses correspondantes.
 4. À la fermeture, consulte les soldes réels dans les applications/terminaux opérateur, compte les espèces et clôture.
@@ -96,7 +96,7 @@ Migration : `supabase/migrations/202610030001_kaisse_pro_v1.sql`.
 
 | Table | Rôle / champs métier importants |
 |---|---|
-| `agences` | Nom, ville, code d'invitation, propriétaire, devise XOF, statut et dates d'essai (migration 002) |
+| `agences` | Nom, ville, code d'invitation, propriétaire, devise XOF, statut, dates d'essai, plan et échéance payée (migration 002) |
 | `profils` | Lien `auth.users`, agence, nom/prénom/téléphone, rôle, actif |
 | `operateurs` | Référentiel lecture seule Orange, MTN, Moov, Wave |
 | `points` | Agence, nom, ville, seuil float, actif |
@@ -109,10 +109,12 @@ Migration : `supabase/migrations/202610030001_kaisse_pro_v1.sql`.
 ### Sécurité et intégrité
 
 - RLS est activé sur les tables métier. Les données restent dans l'agence du profil authentifié.
+- Le client ne peut pas écrire les champs d'abonnement ni modifier un rôle/un rattachement d'agence; l'opérateur active le paiement dans SQL après confirmation. Les modifications métier autorisées aux gérants restent soumises à l'échéance.
 - Un agent ne lit que ses sessions/opérations; propriétaire et gérant voient l'agence.
 - L'inscription déclenche la création du profil et, le cas échéant, de l'agence et du premier point.
 - La migration 002 donne 14 jours aux **nouvelles agences**. Les agences antérieures gardent les colonnes d'abonnement à `NULL`, restent pleinement actives et ne sont ni mises à jour ni converties en essai.
-- À expiration, l'espace d'une nouvelle agence reste consultable et exportable en lecture seule; les données ne sont pas supprimées. La clôture d'une session déjà ouverte reste autorisée.
+- Les périodes Starter/Pro peuvent être activées manuellement pour 30 jours. À l'expiration de l'essai ou de la période payée, l'espace reste consultable et exportable en lecture seule; les données ne sont pas supprimées. La clôture d'une session déjà ouverte reste autorisée.
+- Le paiement SasPay et son webhook ne sont pas intégrés dans ce dépôt; il faut confirmer manuellement le règlement avant de renseigner le plan et son échéance.
 - Les ouvertures/clôtures sont des fonctions SQL atomiques et vérifient l'agence, le point, le rôle et les montants.
 - Les opérations n'ont pas de suppression physique; l'annulation est motivée et contrôlée.
 - Le navigateur utilise uniquement l'URL Supabase et la clé publique anon/publishable. **Ne jamais exposer `service_role` dans Vite, Git ou `.env` envoyé au navigateur.**
@@ -131,21 +133,21 @@ Pour un projet Supabase **déjà peuplé**, ne réexécutez pas aveuglément la 
 
 Sans `.env.local`, l'application ouvre une démo modifiable locale, balisée comme fictive. Rien de la démo n'est envoyé à Supabase.
 
-## 6. Modèle économique et prix recommandés
+## 6. Modèle économique et tarifs de référence
 
-### Tarif public de départ
+Les tarifs ci-dessous reprennent les offres publiques observées sur [`kaissseapp.vercel.app`](https://kaissseapp.vercel.app). Ils remplacent l'ancien scénario « frais d'installation + prix par point » de ce document.
 
-- **Essai du logiciel : 14 jours gratuits par nouvelle agence**, sans carte bancaire ni prélèvement automatique. Le compte est créé à l'inscription; si le client ne convertit pas, les données restent consultables/exportables en lecture seule après l'essai.
-- **Installation & prise en main : 50 000 FCFA par agence**, une fois. Comprend : paramétrage du premier point, configuration des rôles, reprise simple des soldes d'ouverture (pas d'import historique garanti), formation sur place jusqu'à 3 personnes, assistance de démarrage pendant 30 jours. Cette prestation peut être facturée au moment où le client choisit de convertir.
-- **Abonnement : 10 000 FCFA par point et par mois**, payable manuellement d'avance après la période d'essai (à partir du jour 15 si le client convertit). Comprend 1 point, jusqu'à 3 accès et les modules V1. Aucun paiement automatique n'est collecté par l'application.
-- **Point supplémentaire : 5 000 FCFA/mois**; mise en place supplémentaire facturée 15 000 FCFA si elle nécessite une nouvelle visite/formation.
-- **Premiers 10 clients fondateurs à Daloa : 35 000 FCFA d'installation**, puis 10 000 FCFA/mois après l'essai. Remise exceptionnelle de 15 000 FCFA contre rendez-vous de retour d'expérience, sans avis positif imposé. Prix mensuel bloqué 12 mois.
+- **Essai : 14 jours par nouvelle agence**, sans carte et sans prélèvement automatique. Les agences déjà inscrites avant activation de l'essai conservent leur accès et leurs données inchangés.
+- **Starter : 10 000 FCFA par période de 30 jours**, jusqu'à 3 agents.
+- **Pro : 25 000 FCFA par période de 30 jours**, agents illimités.
+- Le paiement est annoncé via **SasPay**, par période de 30 jours, sans renouvellement automatique. Le client choisit s'il renouvelle; les conditions d'échéance et de remboursement doivent être communiquées avant paiement.
+- À la fin de l'essai ou d'une période payée non renouvelée, les données restent conservées et consultables/exportables en lecture seule; aucune suppression n'est effectuée.
 
-### Pourquoi installation + récurrent
+**État technique dans ce dépôt :** l'application gère l'essai et les périodes payées à échéance, mais aucun checkout SasPay ni webhook n'est configuré ici. L'encaissement et l'activation du forfait doivent donc être confirmés manuellement par l'équipe Kaisse. Les identifiants SasPay et le projet Vercel de référence ne sont pas fournis à ce dépôt; ne pas présenter le paiement comme intégré.
 
-L'essai permet au gérant de vérifier le parcours avant de s'engager; l'installation payante finance le travail de terrain (réglages, formation et support). L'abonnement rémunère l'usage, les sauvegardes et l'assistance continue. L'activation après paiement est manuelle dans cette V1 : l'équipe Kaisse passe le statut de l'agence à `actif` dans Supabase; aucun prélèvement automatique n'est effectué.
+La migration 002 conserve les colonnes historiques nulles des agences déjà présentes. Elle ajoute aussi `plan_abonnement` (`starter` ou `pro`) et `abonnement_termine_le`; ces champs sont nuls par défaut et ne changent pas les droits existants. Une activation payée saisit le plan et une échéance de 30 jours sur **une agence vérifiée**. Une période déjà échue bloque les nouvelles écritures, sans bloquer la lecture, l'export ou la clôture d'une session déjà ouverte.
 
-Facturer sur reçu, garder une trace des encaissements, préciser durée, échéance, résiliation et traitement des données dans des conditions écrites. Le modèle ci-dessous est du **cash brut encaissé**, pas du bénéfice net et pas un avis fiscal.
+Le modèle ci-dessous estime le **cash brut encaissé**, pas le bénéfice net : il ne déduit ni frais SasPay, ni fiscalité, support, déplacements, hébergement, remboursements ou impayés. Il est indicatif, pas une prévision garantie.
 
 ## 7. Obtenir les 10 premiers clients à Daloa
 
@@ -158,7 +160,7 @@ Facturer sur reçu, garder une trace des encaissements, préciser durée, éché
 
 ### Offre pilote fondatrice
 
-**14 jours pour essayer le logiciel sans frais ni carte bancaire.** À la conversion, l'offre fondatrice est de 35 000 FCFA d'installation puis 10 000 FCFA/mois; le premier abonnement est payé manuellement à partir du jour 15. Le gérant peut acheter l'installation accompagnée dès le début ou au moment de la conversion. Démonstration de 15 minutes avec chiffres fictifs, puis configuration avec les soldes que le gérant choisit lui-même. Ne pas demander ses codes PIN/OTP ni prendre le contrôle de ses comptes opérateur.
+**14 jours pour essayer le logiciel sans frais ni carte bancaire.** À la conversion, le gérant choisit Starter (10 000 FCFA/30 jours, jusqu'à 3 agents) ou Pro (25 000 FCFA/30 jours, agents illimités). Le renouvellement est volontaire, sans prélèvement automatique; l'offre publique annonce SasPay. Dans cette version, l'équipe Kaisse confirme manuellement le règlement et l'activation. Faire une démonstration de 15 minutes avec des chiffres fictifs, puis configurer les soldes choisis par le gérant. Ne jamais demander ses codes PIN/OTP ni prendre le contrôle de ses comptes opérateur.
 
 Le gérant peut ne pas convertir : après 14 jours, ses données restent en lecture seule et exportables; rien n'est supprimé et aucun débit automatique n'a lieu. Ne promettre ni « zéro écart », ni hausse de commission, ni prévention garantie des vols. Promesse mesurable : **chaque ligne est datée, attribuée et rapprochée selon les mouvements saisis**.
 
@@ -180,49 +182,49 @@ Cible commerciale (à mesurer, pas à garantir) : 30 contacts qualifiés → 20 
 - Jour 0 : démarrer l'essai, installer/raccourci sur le téléphone, créer le point et les accès; accompagner la saisie des soldes avec le gérant.
 - Jour 1 : assister la première clôture sans saisir les données à la place de l'agent.
 - Jours 3, 7, 12 : appel/WhatsApp manuel de 10 minutes; relever lignes oubliées, erreurs, temps de clôture et suggestions.
-- Jour 14 : montrer les usages mesurés; si le gérant choisit de continuer, encaisser installation/abonnement selon le devis puis activer manuellement le statut `actif`. Sinon, laisser les données en lecture seule/exportables sans pression.
+- Jour 14 : montrer les usages mesurés; si le gérant choisit de continuer, confirmer le règlement SasPay hors application puis activer manuellement le forfait choisi pour 30 jours. Sinon, laisser les données en lecture seule/exportables sans pression.
 
 Mesures de validation : au moins 8/10 points actifs 5 jours sur 7; au moins 90 % des opérations déclarées saisies le jour même; clôture médiane sous 10 minutes; 7/10 pilotes prêts à payer après l'accompagnement. Si les chiffres ne sont pas atteints, ne pas accélérer l'acquisition : rechercher pourquoi les agents ne saisissent pas.
 
 ### Canal de recommandation
 
-Après la deuxième facture payée d'un client référent, crédit de **5 000 FCFA** sur son abonnement pour chaque nouveau point qui souscrit. Plafond et conditions écrits; jamais de commission avant paiement client.
+Tester les recommandations après les pilotes, sans modifier les tarifs publics ni annoncer de remise avant validation. Toute récompense éventuelle doit être plafonnée, écrite et versée uniquement après confirmation du paiement du nouveau client.
 
-## 8. Plan chiffré pour atteindre 10 millions FCFA encaissés
+## 8. Scénario indicatif pour 10 millions FCFA encaissés
 
-### Hypothèses de ce scénario cible
+### Hypothèses du scénario (volontaristes)
 
-- Les 10 premiers points paient 35 000 FCFA d'installation; les suivants 50 000 FCFA.
-- Le logiciel est gratuit pendant 14 jours. Les cohortes sont supposées démarrer au début de chaque mois et convertir avant le jour 14; elles paient alors l'installation et le premier mois à 10 000 FCFA/point. Les renouvellements sont payés d'avance.
-- Zéro churn, zéro retard de paiement; l'activation est manuelle après encaissement. Une acquisition plus tardive dans le mois repousse une partie des abonnements.
-- Encaissements bruts hors impôts, frais commerciaux, déplacements, support, matériel, remboursements et coûts de paiement. Ce n'est **pas une prévision garantie**.
+- 70 % des agences converties prennent Starter à 10 000 FCFA/30 jours et 30 % prennent Pro à 25 000 FCFA/30 jours, soit un prix moyen pondéré de **14 500 FCFA par agence et par période**.
+- Nouveaux essais : 10, 15, 20, 25, 30, 35, 40 et 45 par mois. Toutes les agences convertissent après 14 jours, paient et renouvellent; aucun churn ni retard.
+- Les cohortes sont supposées démarrer au début de chaque cycle de 30 jours et payer une fois à la fin de l'essai, puis chaque période. Le tableau simplifie les échéances en mois de projection.
+- Aucun frais d'installation n'est inclus, conformément aux deux tarifs publics présentés. Encaissements bruts hors frais SasPay, coûts commerciaux, support, impôts, hébergement, remboursement et impayés. Ce n'est **pas une prévision garantie**.
 
-| Mois | Nouveaux points | Points cumulés | Installations encaissées | Abonnements encaissés | Encaissement du mois | Cumul encaissé |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 10 | 10 | 350 000 | 100 000 | 450 000 | 450 000 |
-| 2 | 15 | 25 | 750 000 | 250 000 | 1 000 000 | 1 450 000 |
-| 3 | 20 | 45 | 1 000 000 | 450 000 | 1 450 000 | 2 900 000 |
-| 4 | 25 | 70 | 1 250 000 | 700 000 | 1 950 000 | 4 850 000 |
-| 5 | 30 | 100 | 1 500 000 | 1 000 000 | 2 500 000 | 7 350 000 |
-| 6 | 35 | 135 | 1 750 000 | 1 350 000 | 3 100 000 | **10 450 000** |
-| 7 | 40 | 175 | 2 000 000 | 1 750 000 | 3 750 000 | 14 200 000 |
+| Cycle | Nouveaux essais | Agences payantes cumulées | Encaissement estimé du cycle | Cumul brut |
+|---:|---:|---:|---:|---:|
+| 1 | 10 | 10 | 145 000 | 145 000 |
+| 2 | 15 | 25 | 362 500 | 507 500 |
+| 3 | 20 | 45 | 652 500 | 1 160 000 |
+| 4 | 25 | 70 | 1 015 000 | 2 175 000 |
+| 5 | 30 | 100 | 1 450 000 | 3 625 000 |
+| 6 | 35 | 135 | 1 957 500 | 5 582 500 |
+| 7 | 40 | 175 | 2 537 500 | 8 120 000 |
+| 8 | 45 | 220 | 3 190 000 | **11 310 000** |
 
-Avec ces hypothèses très volontaristes, le seuil de 10 M est franchi au **mois 6**, après 135 installations cumulées. Le run-rate récurrent de ces 135 points serait 1,35 M FCFA/mois avant coûts et churn; ce n'est pas du bénéfice net.
+Avec 100 % de conversion/renouvellement et cette forte acquisition, le seuil de 10 M FCFA bruts serait dépassé au cycle 8, après 220 agences cumulées. À 135 agences actives, le chiffre d'affaires récurrent théorique serait d'environ 1 957 500 FCFA par période de 30 jours avant frais, churn et impôts — ce n'est pas le bénéfice net.
 
 ### Lecture franche
 
-- **Option mathématique la plus simple :** 200 installations à 50 000 FCFA = 10 M FCFA de frais d'installation seuls. C'est une cible volumique, pas un plan court réaliste sans équipe commerciale.
-- **Scénario mixte ci-dessus :** il ajoute les abonnements mais demande 135 conversions en six mois. Il faudra valider le produit à Daloa, puis s'étendre vers Bouaké, Yamoussoukro, Abidjan et d'autres villes avec des références clients et des relais terrain.
-- Une baisse de conversion, 10 % de churn, une facturation tardive ou un coût d'installation élevé repousse l'échéance. Suivre le **cash encaissé réel** dans un tableau séparé des ventes signées.
-- Si l'on veut accélérer sans multiplier immédiatement les points : vendre un forfait annuel prépayé seulement après validation de la rétention, avec des conditions de remboursement explicites; ne pas compter deux fois les mois inclus dans l'installation.
+- Ce résultat dépend beaucoup plus du nombre d'agences payantes, du taux de conversion et de la rétention que d'un frais d'installation qui n'apparaît pas dans l'offre de référence.
+- Une conversion de 50 %, un mix plus orienté Starter, des paiements tardifs ou du churn repoussent fortement l'objectif. Tenir un suivi séparé des essais, contrats, paiements confirmés, dates d'échéance et montants réellement encaissés.
+- Valider d'abord la rétention et les coûts de support à Daloa; ne pas présenter ces encaissements bruts comme revenu garanti ou rentabilité.
 
 ### Jalons de passage à l'échelle
 
-1. **10 clients à Daloa :** atteindre les mesures d'usage ci-dessus; corriger les irritants.
-2. **25 clients :** documenter les barèmes réellement utilisés (source/date), standardiser l'installation et le support.
-3. **50 clients :** former un second commercial/onboarder; utiliser uniquement les témoignages autorisés et les chiffres agrégés.
-4. **100 clients :** ouvrir des relais dans deux nouvelles villes, formaliser renouvellement, résiliation, sauvegardes et gestion des incidents.
-5. **135+ conversions :** l'objectif de 10 M bruts cumulés est franchi dans le scénario cible; comparer au cash réel et aux coûts avant de parler de rentabilité.
+1. **10 pilotes :** mesurer la fréquence d'usage, la part des opérations saisies le jour même et le temps de clôture.
+2. **25 agences payantes :** vérifier le mix Starter/Pro, les renouvellements et les demandes de support.
+3. **50 agences :** standardiser l'accueil, les conditions de paiement et la gestion manuelle des échéances.
+4. **100 agences :** valider les coûts d'acquisition, la qualité des exports et les besoins d'opération.
+5. **220 agences actives :** objectif théorique de 10 M FCFA bruts cumulés au cycle 8 selon les seules hypothèses ci-dessus; rapprocher les chiffres des encaissements réels.
 
 ## 9. Prochaine version après les pilotes
 

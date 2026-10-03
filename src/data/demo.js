@@ -37,7 +37,7 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
       id: "demo-agence",
       nom: "Agence Centre Daloa",
       ville: "Daloa",
-      code_invitation: "DALOA26",
+      code_invitation: "KSSPAB26",
       proprietaire_id: ownerId,
     },
     profiles: [

@@ -212,7 +212,7 @@ begin
       raise exception 'Le nom de l''agence est obligatoire.';
     end if;
 
-    v_code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));
+    v_code := upper(translate(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8), '01', 'AB'));
     insert into public.agences (nom, ville, code_invitation, proprietaire_id)
     values (
       btrim(new.raw_user_meta_data ->> 'nom_agence'),
@@ -242,7 +242,7 @@ begin
     end if;
 
     insert into public.profils (id, agence_id, prenom, nom, telephone, role)
-    values (new.id, v_agence_id, v_prenom, v_nom, v_telephone, 'agent');
+    values (new.id, v_agence_id, v_prenom, v_nom, v_telephone, 'gerant');
   else
     raise exception 'Choisissez la création d''une agence ou le rattachement à une équipe.';
   end if;
@@ -511,8 +511,8 @@ create policy commissions_modifier_manager on public.commission_baremes
   for update to authenticated using (public.peut_gerer_agence(agence_id)) with check (public.peut_gerer_agence(agence_id));
 
 -- Pas de DELETE : opérations, dépenses et clôtures constituent un journal d'audit.
-grant select, update on public.agences to authenticated;
-grant select, update on public.profils to authenticated;
+grant select on public.agences to authenticated;
+grant select on public.profils to authenticated;
 grant select on public.operateurs to authenticated;
 grant select, insert, update on public.points to authenticated;
 grant select on public.sessions_caisse to authenticated;
@@ -520,6 +520,10 @@ grant select on public.soldes_session_operateur to authenticated;
 grant select, insert, update on public.transactions to authenticated;
 grant select, insert on public.depenses to authenticated;
 grant select, insert, update on public.commission_baremes to authenticated;
+revoke update on public.agences from public, anon, authenticated;
+revoke update on public.profils from public, anon, authenticated;
+grant update (nom, ville, code_invitation) on public.agences to authenticated;
+grant update (prenom, nom, telephone, actif) on public.profils to authenticated;
 
 grant usage, select on all sequences in schema public to authenticated;
 
