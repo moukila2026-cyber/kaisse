@@ -30,7 +30,7 @@ export async function loadWorkspace(userId, date, reportRange = { startDate: dat
   const agencyId = profile.agence_id;
   const [pointsResult, profilesResult, operatorsResult, sessionsResult, rulesResult, reportSessionsResult] = await Promise.all([
     supabase.from("points").select("*").eq("agence_id", agencyId).eq("actif", true).order("nom"),
-    supabase.from("profils").select("id, nom, prenom, telephone, role, agence_id, actif").eq("agence_id", agencyId).eq("actif", true).order("prenom"),
+    supabase.from("profils").select("id, nom, prenom, telephone, role, agence_id, actif").eq("agence_id", agencyId).order("prenom"),
     supabase.from("operateurs").select("code, nom, couleur, ordre").order("ordre"),
     supabase.from("sessions_caisse").select("*").eq("agence_id", agencyId).eq("date_caisse", date).order("ouverte_le", { ascending: false }),
     supabase.from("commission_baremes").select("*").eq("agence_id", agencyId).eq("actif", true).order("operateur_code"),

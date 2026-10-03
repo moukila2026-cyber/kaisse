@@ -358,6 +358,13 @@ begin
 end;
 $$;
 
+-- Aucune suppression physique ni réécriture métier du journal n'est autorisée.
+-- Le rôle manager ne peut mettre à jour que les champs d'annulation; RLS et trigger
+-- imposent le motif et préservent les colonnes de la transaction.
+revoke delete on table public.transactions from public, anon, authenticated;
+revoke update on table public.transactions from public, anon, authenticated;
+grant update (annulee_le, motif_annulation) on table public.transactions to authenticated;
+
 -- Les anciennes RPC ne doivent pas permettre de contourner la saisie du stock.
 -- Les nouvelles fonctions SECURITY DEFINER les appellent en interne.
 revoke all on function public.ouvrir_session(uuid, date, bigint, jsonb) from public, anon, authenticated;

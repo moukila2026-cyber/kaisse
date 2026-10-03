@@ -31,7 +31,7 @@ Le produit **n'est pas** une application grand public et **n'est pas** un portef
 8. **Clôture** : chaque utilisateur déclare les espèces, les quatre soldes de float et le stock d'unités réellement comptés sur sa session. Les écarts sont calculés par opérateur; le stock d'unités est rapproché séparément du float.
 9. **Tableau de bord journalier** : volume d'opérations, nombre de lignes, commissions déclarées/estimées, dépenses, résultat indicatif, état de la session, volumes par opérateur et écarts des clôtures.
 10. **Rapport** : partage manuel du rapport texte, export CSV ou PDF imprimable; filtres période (jour/7/30 jours), type, opérateur et agent. Aucun envoi planifié WhatsApp en V1.
-11. **Journal d'audit minimal** : pas de suppression physique d'une transaction. Un propriétaire/gérant peut annuler une ligne avec un motif; la ligne reste visible, mais ne contribue plus aux soldes.
+11. **Journal d'audit minimal** : aucune suppression physique d'une transaction. Un agent ne peut ni supprimer ni annuler un transfert d'argent ou d'unités, quel que soit l'opérateur; la base refuse aussi les suppressions directes. Un propriétaire/gérant peut annuler une ligne avec un motif; elle reste visible dans le journal, mais ne contribue plus aux soldes.
 12. **Alertes déterministes** : écart déclaré/théorique non nul, commission réelle manquante, float sous le seuil configuré et stock historique non suivi. Pas d'intelligence artificielle ni de détection de fraude.
 
 ### Hors périmètre V1 (à ne pas vendre comme disponible)
@@ -75,7 +75,7 @@ Le stock théorique d'un opérateur est `stock initial + approvisionnements − 
 |---|---|---|
 | Accueil | Proposition de valeur, périmètre manuel explicite, opérateurs, démo | Essayer la démo / se connecter |
 | Connexion & inscription | Connexion, création d'agence, ou rejoindre une agence par code | Ouvrir un compte Supabase |
-| Vue d'ensemble | Date/point/session, KPIs du jour, opérations par opérateur, soldes théoriques, dernières lignes, clôtures en écart | Nouvelle opération / ouvrir caisse / rapport |
+| Vue d'ensemble | Date/point/session, KPIs du jour, opérations par opérateur, soldes théoriques et toutes les transactions du jour sélectionné avec date, heure, agent et opérateur; clôtures en écart | Nouvelle opération / ouvrir caisse / rapport |
 | Opérations | Journal filtrable par période, type, opérateur et agent; règlement des mouvements d'unités; commissions estimées/réelles; annulation motivée pour manager; export CSV ou PDF imprimable | Dépôt, retrait, transfert float, approvisionnement/transfert d'unités, dépense |
 | Caisse & clôture | Sélecteur de session, soldes théoriques espèces/float, stock d'unités par opérateur, comptages réels et écarts distincts | Ouvrir, saisir dépense, clôturer sa session |
 | Équipe & points | Membres visibles selon le rôle, statut de session, points de vente, code d'invitation | Copier code / ajouter un point |
@@ -113,7 +113,8 @@ Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002
 
 - RLS est activé sur les tables métier. Les données restent dans l'agence du profil authentifié.
 - Le client ne peut pas écrire les champs d'abonnement ni modifier un rôle/un rattachement d'agence; l'opérateur active le paiement dans SQL après confirmation. Les modifications métier autorisées aux gérants restent soumises à l'échéance.
-- Un agent ne lit que ses sessions/opérations; propriétaire et gérant voient l'agence. Les opérations et comptages restent liés à la session de l'utilisateur connecté; le propriétaire ne peut pas saisir un mouvement au nom d'un agent. La clôture de stock est également réservée au propriétaire/agent de sa propre session.
+- Un agent ne lit que ses sessions/opérations; propriétaire et gérant voient l'agence. Le tableau de bord manager affiche toutes les transactions du jour sélectionné avec leur date/heure et l'agent associé; le journal conserve les filtres de période et d'agent. Les opérations et comptages restent liés à la session de l'utilisateur connecté; le propriétaire ne peut pas saisir un mouvement au nom d'un agent. La clôture de stock est également réservée au propriétaire/agent de sa propre session.
+- Les suppressions de transactions sont interdites en base; les mises à jour sont limitées aux champs d'annulation. Seuls les propriétaires/gérants autorisés peuvent annuler avec motif; l'agent ne peut pas annuler ni supprimer un transfert d'argent ou d'unités.
 - L'inscription déclenche la création du profil et, le cas échéant, de l'agence et du premier point.
 - La migration 002 donne 14 jours aux **nouvelles agences**. Les agences antérieures gardent les colonnes d'abonnement à `NULL`, restent pleinement actives et ne sont ni mises à jour ni converties en essai.
 - Les périodes Starter/Pro peuvent être activées manuellement pour 30 jours. À l'expiration de l'essai ou de la période payée, l'espace reste consultable et exportable en lecture seule; les données ne sont pas supprimées. La clôture d'une session déjà ouverte reste autorisée.

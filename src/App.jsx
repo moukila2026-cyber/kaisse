@@ -740,6 +740,7 @@ function App() {
             selectedSessionId={selectedSessionId}
             onSessionChange={setSelectedSessionId}
             transactions={dayTransactions}
+            sessionDateById={reportSessionDateById}
             expenses={dayExpenses}
             volume={volumeTotal}
             commissions={commissionDeclaredTotal}
@@ -1038,7 +1039,7 @@ function KpiCard({ label, value, hint, icon: Icon, tone = "ink" }) {
 
 function OverviewPage({
   agency, user, selectedDate, pointFilter, selectedSession, selectedSummary, sessionSummaries,
-  selectedSessionId, onSessionChange, transactions, expenses, volume, commissions,
+  selectedSessionId, onSessionChange, transactions, sessionDateById, expenses, volume, commissions,
   commissionEstimate, commissionNeedsReview, resultEstimate, closedWithDifference,
   operatorOrder, operatorByCode, pointById, agentById, canManage, canWrite, onGo, onOpenModal,
   onShare, onOpenOwnSession, onCancel,
@@ -1050,7 +1051,7 @@ function OverviewPage({
       .reduce((sum, transaction) => sum + Number(transaction.montant || 0), 0),
   }));
   const maxOperatorVolume = Math.max(1, ...operatorVolumes.map((operator) => operator.volume));
-  const recentTransactions = transactions.filter((transaction) => !transaction.annulee_le).slice(0, 5);
+  const dashboardTransactions = transactions;
   const ownOpen = sessionSummaries.find(({ session }) => session.agent_id === user.id && session.statut === "ouverte")?.session;
   const selectedPoint = selectedSession ? pointById.get(selectedSession.point_id) : null;
   const floatBelowThreshold = selectedPoint && selectedSummary
@@ -1113,8 +1114,8 @@ function OverviewPage({
       </div>
 
       <section className="panel recent-panel">
-        <div className="panel-heading"><div><h2>Dernières opérations</h2><p>{formatDate(selectedDate)} · {transactions.length} lignes dans le journal</p></div><button className="text-button" onClick={() => onGo("operations")}>Voir tout <ArrowRight size={15} /></button></div>
-        {recentTransactions.length ? <TransactionTable rows={recentTransactions} operators={operatorByCode} points={pointById} agents={agentById} canManage={canManage && canWrite} onCancel={onCancel} compact /> : <div className="empty-state compact"><ReceiptText size={22} /><p>Aucune opération enregistrée pour cette date.</p></div>}
+        <div className="panel-heading"><div><h2>Transactions du jour sélectionné</h2><p>{formatDate(selectedDate)} · {dashboardTransactions.length} lignes · {canManage ? "toute l'équipe" : "votre activité"}</p></div><button className="text-button" onClick={() => onGo("operations")}>Journal complet <ArrowRight size={15} /></button></div>
+        {dashboardTransactions.length ? <TransactionTable rows={dashboardTransactions} operators={operatorByCode} points={pointById} agents={agentById} canManage={canManage && canWrite} onCancel={onCancel} compact showDate sessionDateById={sessionDateById} /> : <div className="empty-state compact"><ReceiptText size={22} /><p>Aucune opération enregistrée pour cette date.</p></div>}
       </section>
     </main>
   );
@@ -1246,11 +1247,12 @@ function VarianceBox({ declared, theoretical, variance }) {
 
 function TeamPage({ agency, user, profiles, points, sessions, summaries, canManage, canWrite, onOpenModal, onCopyCode }) {
   const openByAgent = new Map(sessions.filter((session) => session.statut === "ouverte").map((session) => [session.agent_id, session]));
+  const activeProfileCount = profiles.filter((profile) => profile.actif).length;
   return (
     <main className="content-area">
       <PageHeading eyebrow="ORGANISATION" title="Équipe & points" description="Un profil agent par personne; chaque opération est rattachée à sa session." actions={canManage && canWrite && <button className="button button-dark" onClick={() => onOpenModal("point")}><Plus size={16} />Ajouter un point</button>} />
       {canManage && canWrite && <section className="invite-card"><div className="invite-icon"><Users size={19} /></div><div className="invite-copy"><span>INVITER UN GÉRANT</span><h2>Partagez le code de votre agence.</h2><p>Le gérant crée son accès avec son propre email et choisit « Rejoindre une équipe ». Ne partagez jamais votre mot de passe.</p></div><div className="invite-code"><small>CODE D'INVITATION</small><strong>{agency.code_invitation || "—"}</strong><button className="button button-paper" onClick={onCopyCode}><Copy size={15} />Copier</button></div></section>}
-      <div className="team-columns"><section className="panel team-panel"><div className="panel-heading"><div><h2>Membres de l'équipe</h2><p>{profiles.length} profil{profiles.length > 1 ? "s" : ""} actif{profiles.length > 1 ? "s" : ""}</p></div><Users size={19} className="panel-heading-icon" /></div>{profiles.length ? <div className="team-list">{profiles.map((profile) => { const session = openByAgent.get(profile.id); const point = session && points.find((item) => item.id === session.point_id); return <div className="team-member" key={profile.id}><div className="avatar small-avatar">{getInitials(profile)}</div><div className="team-member-name"><strong>{profile.prenom} {profile.nom}</strong><span>{profile.role === "proprietaire" ? "Propriétaire" : profile.role === "gerant" ? "Gérant" : "Agent"}{profile.telephone ? ` · ${profile.telephone}` : ""}</span></div><div className={`member-session ${session ? "online" : "offline"}`}><span />{session ? `En session · ${point?.nom || "Point"}` : "Pas de session ouverte"}</div></div>; })}</div> : <div className="empty-inline">Aucun profil visible pour votre compte.</div>}</section>
+      <div className="team-columns"><section className="panel team-panel"><div className="panel-heading"><div><h2>Membres de l'équipe</h2><p>{activeProfileCount} profil{activeProfileCount > 1 ? "s" : ""} actif{activeProfileCount > 1 ? "s" : ""}{profiles.length > activeProfileCount ? ` · ${profiles.length - activeProfileCount} désactivé${profiles.length - activeProfileCount > 1 ? "s" : ""}` : ""}</p></div><Users size={19} className="panel-heading-icon" /></div>{profiles.length ? <div className="team-list">{profiles.map((profile) => { const session = openByAgent.get(profile.id); const point = session && points.find((item) => item.id === session.point_id); return <div className="team-member" key={profile.id}><div className="avatar small-avatar">{getInitials(profile)}</div><div className="team-member-name"><strong>{profile.prenom} {profile.nom}</strong><span>{profile.role === "proprietaire" ? "Propriétaire" : profile.role === "gerant" ? "Gérant" : "Agent"}{profile.telephone ? ` · ${profile.telephone}` : ""}{!profile.actif ? " · Accès désactivé" : ""}</span></div><div className={`member-session ${session ? "online" : "offline"}`}><span />{session ? `${profile.actif ? "En session" : "Session ouverte · accès désactivé"} · ${point?.nom || "Point"}` : profile.actif ? "Pas de session ouverte" : "Accès désactivé"}</div></div>; })}</div> : <div className="empty-inline">Aucun profil visible pour votre compte.</div>}</section>
         <section className="panel points-panel"><div className="panel-heading"><div><h2>Points de vente</h2><p>{points.length} point{points.length > 1 ? "s" : ""} configuré{points.length > 1 ? "s" : ""}</p></div><Building2 size={19} className="panel-heading-icon" /></div>{points.length ? <div className="points-list">{points.map((point) => { const opened = sessions.filter((session) => session.point_id === point.id && session.statut === "ouverte").length; const pointSessions = summaries.filter(({ session }) => session.point_id === point.id); const balance = pointSessions.reduce((sum, { session, totals }) => sum + (session.statut === "ouverte" ? totals.floatExpected : Number(totals.floatDeclared || 0)), 0); return <div className="point-row" key={point.id}><div className="point-icon"><Store size={16} /></div><div className="point-meta"><strong>{point.nom}</strong><span><MapPin size={12} />{point.ville || agency.ville}</span></div><div className="point-live"><strong>{formatMoney(balance)}</strong><span>{opened ? `${opened} session${opened > 1 ? "s" : ""} en cours` : "Aucune session active"}</span></div></div>; })}</div> : <div className="empty-inline">Créez votre premier point pour ouvrir une session de caisse.</div>}{canManage && canWrite && <button className="add-point-row" onClick={() => onOpenModal("point")}><Plus size={15} />Ajouter un point de vente</button>}</section></div>
       {!canManage && <div className="ledger-footnote"><LockKeyhole size={16} /><span>Seuls le propriétaire et les gérants peuvent voir toute l'équipe et gérer les points.</span></div>}
     </main>
