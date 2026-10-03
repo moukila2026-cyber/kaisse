@@ -1,9 +1,13 @@
 export const OPERATION_TYPES = [
   { code: "depot", label: "Dépôt" },
   { code: "retrait", label: "Retrait" },
-  { code: "transfert", label: "Transfert" },
-  { code: "achat_credit", label: "Achat crédit / unités" },
+  { code: "transfert", label: "Transfert float" },
+  { code: "achat_credit", label: "Achat crédit via float" },
+  { code: "approvisionnement_unites", label: "Approvisionnement unités" },
+  { code: "transfert_unites", label: "Transfert d'unités client" },
 ];
+
+export const COMMISSION_OPERATION_TYPES = OPERATION_TYPES.filter((operation) => operation.code !== "approvisionnement_unites");
 
 export const EXPENSE_CATEGORIES = ["Transport", "Restauration", "Frais opératoires", "Autre"];
 
@@ -18,7 +22,7 @@ export function getReportDateRange(endDate, period = "day") {
 export function filterReportTransactions(transactions, { type = "tous", operator = "tous", agent = "tous" } = {}) {
   return transactions.filter((transaction) =>
     (type === "tous" || transaction.type_operation === type)
-    && (operator === "tous" || transaction.operateur_code === operator || transaction.operateur_destination_code === operator)
+    && (operator === "tous" || transaction.operateur_code === operator || transaction.operateur_destination_code === operator || transaction.operateur_paiement_code === operator)
     && (agent === "tous" || transaction.agent_id === agent),
   );
 }
@@ -79,13 +83,35 @@ export function calculateCommission(transaction, rules = []) {
     + (amount * Number(matchingRule.taux_points_base || 0)) / 10_000);
 }
 
-export function calculateSession(session, sessionFloats = [], transactions = [], expenses = []) {
+export function calculateSession(session, sessionFloats = [], transactions = [], expenses = [], sessionUnits = [], operators = []) {
   const activeTransactions = transactions.filter((transaction) =>
     transaction.session_id === session.id && !transaction.annulee_le,
   );
   const activeExpenses = expenses.filter((expense) => expense.session_id === session.id);
+  const unitRows = sessionUnits.filter((row) => row.session_id === session.id);
+  const unitCodes = operators.length
+    ? operators.map((operator) => operator.code)
+    : Array.from(new Set(unitRows.map((row) => row.operateur_code)));
 
   let cashExpected = Number(session.caisse_ouverture || 0);
+  const floatMap = Object.fromEntries(sessionFloats
+    .filter((row) => row.session_id === session.id)
+    .map((row) => [row.operateur_code, {
+      ouverture: Number(row.solde_ouverture || 0),
+      declare: row.solde_cloture_declare == null ? null : Number(row.solde_cloture_declare),
+      theorique: Number(row.solde_ouverture || 0),
+    }]));
+  const unitMap = Object.fromEntries(unitCodes.map((code) => {
+    const openingRow = unitRows.find((row) => row.operateur_code === code);
+    const opening = Number(openingRow?.unites_ouverture || 0);
+    return [code, {
+      ouverture: opening,
+      declare: openingRow?.unites_cloture_declare == null ? null : Number(openingRow.unites_cloture_declare),
+      theorique: opening,
+      suivi: Boolean(openingRow && !openingRow.stock_initial_non_saisi),
+    }];
+  }));
+
   for (const transaction of activeTransactions) {
     const amount = Number(transaction.montant || 0);
     switch (transaction.type_operation) {
@@ -96,24 +122,18 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
       case "retrait":
         cashExpected -= amount;
         break;
+      case "approvisionnement_unites":
+        if (transaction.mode_paiement_unites === "especes") cashExpected -= amount;
+        break;
+      case "transfert_unites":
+        if (transaction.mode_paiement_unites === "especes") cashExpected += amount;
+        break;
       default:
         break;
     }
-  }
 
-  const floatMap = Object.fromEntries(sessionFloats
-    .filter((row) => row.session_id === session.id)
-    .map((row) => [row.operateur_code, {
-      ouverture: Number(row.solde_ouverture || 0),
-      declare: row.solde_cloture_declare == null ? null : Number(row.solde_cloture_declare),
-      theorique: Number(row.solde_ouverture || 0),
-    }]));
-
-  for (const transaction of activeTransactions) {
-    const amount = Number(transaction.montant || 0);
     const source = floatMap[transaction.operateur_code];
     const destination = floatMap[transaction.operateur_destination_code];
-
     if (transaction.type_operation === "depot" || transaction.type_operation === "achat_credit") {
       if (source) source.theorique -= amount;
     } else if (transaction.type_operation === "retrait") {
@@ -121,7 +141,19 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
     } else if (transaction.type_operation === "transfert") {
       if (source) source.theorique -= amount;
       if (destination) destination.theorique += amount;
+    } else if (
+      (transaction.type_operation === "approvisionnement_unites" || transaction.type_operation === "transfert_unites")
+      && transaction.mode_paiement_unites === "wallet"
+    ) {
+      const paymentWallet = floatMap[transaction.operateur_paiement_code];
+      if (paymentWallet) {
+        paymentWallet.theorique += transaction.type_operation === "approvisionnement_unites" ? -amount : amount;
+      }
     }
+
+    const unitStock = unitMap[transaction.operateur_code];
+    if (unitStock && transaction.type_operation === "approvisionnement_unites") unitStock.theorique += amount;
+    if (unitStock && transaction.type_operation === "transfert_unites") unitStock.theorique -= amount;
   }
 
   for (const expense of activeExpenses) {
@@ -137,15 +169,27 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
   const cashDeclared = session.caisse_cloture_declaree == null
     ? null
     : Number(session.caisse_cloture_declaree);
-  const commissionExpected = activeTransactions.reduce(
+  const commissionTransactions = activeTransactions.filter((transaction) => transaction.type_operation !== "approvisionnement_unites");
+  const commissionExpected = commissionTransactions.reduce(
     (total, transaction) => total + Number(transaction.commission_estimee || 0), 0,
   );
-  const commissionDeclared = activeTransactions.reduce(
+  const commissionDeclared = commissionTransactions.reduce(
     (total, transaction) => total + Number(transaction.commission_reelle || 0), 0,
   );
-  const commissionToVerify = activeTransactions.filter((transaction) => transaction.commission_reelle == null).length;
+  const commissionToVerify = commissionTransactions.filter((transaction) => transaction.commission_reelle == null).length;
   const volume = activeTransactions.reduce((total, transaction) => total + Number(transaction.montant || 0), 0);
   const expenseTotal = activeExpenses.reduce((total, expense) => total + Number(expense.montant || 0), 0);
+  const unitRowsTracked = Object.values(unitMap).filter((row) => row.suivi);
+  const unitTracked = unitRowsTracked.length === Object.keys(unitMap).length && unitRowsTracked.length > 0;
+  const unitExpected = unitRowsTracked.reduce((total, row) => total + row.theorique, 0);
+  const unitDeclared = closed && unitTracked
+    ? Object.values(unitMap).reduce((total, row) => total + (row.declare ?? 0), 0)
+    : null;
+  const unitVariance = closed && unitTracked
+    ? Object.values(unitMap).reduce((total, row) => total + (row.declare == null ? 0 : row.declare - row.theorique), 0)
+    : null;
+  const floatHasDifference = closed && Object.values(floatMap).some((row) => row.declare != null && row.declare !== row.theorique);
+  const unitHasDifference = closed && Object.values(unitMap).some((row) => row.suivi && row.declare != null && row.declare !== row.theorique);
 
   return {
     cashExpected,
@@ -159,6 +203,13 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
     floatVariance: closed
       ? Object.values(floatMap).reduce((total, row) => total + (row.declare == null ? 0 : row.declare - row.theorique), 0)
       : null,
+    floatHasDifference,
+    unitMap,
+    unitExpected,
+    unitTracked,
+    unitDeclared,
+    unitVariance,
+    unitHasDifference,
     commissionExpected,
     commissionDeclared,
     commissionToVerify,
@@ -168,7 +219,6 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
     resultEstimate: commissionDeclared - expenseTotal,
   };
 }
-
 export function csvCell(value) {
   const text = String(value ?? "");
   return `"${text.replaceAll('"', '""')}"`;

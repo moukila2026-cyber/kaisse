@@ -42,6 +42,7 @@ import {
 import {
   calculateCommission,
   calculateSession,
+  COMMISSION_OPERATION_TYPES,
   csvCell,
   EXPENSE_CATEGORIES,
   filterReportTransactions,
@@ -225,7 +226,7 @@ function App() {
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [workspace, sessionIds]);
   const sessionSummaries = useMemo(() => daySessions.map((session) => ({
     session,
-    totals: calculateSession(session, workspace?.session_floats || [], dayTransactions, dayExpenses),
+    totals: calculateSession(session, workspace?.session_floats || [], dayTransactions, dayExpenses, workspace?.session_units || [], workspace?.operators || DEFAULT_OPERATORS),
   })), [daySessions, workspace, dayTransactions, dayExpenses]);
   const selectableSessions = sessionSummaries;
   const selectedSession = sessionSummaries.find(({ session }) => session.id === selectedSessionId)?.session || null;
@@ -248,11 +249,11 @@ function App() {
     .reduce((sum, transaction) => sum + Number(transaction.commission_reelle || 0), 0);
   const commissionEstimatedTotal = dayTransactions.filter((transaction) => !transaction.annulee_le)
     .reduce((sum, transaction) => sum + Number(transaction.commission_estimee || 0), 0);
-  const commissionNeedsReview = dayTransactions.filter((transaction) => !transaction.annulee_le && transaction.commission_reelle == null).length;
+  const commissionNeedsReview = dayTransactions.filter((transaction) => !transaction.annulee_le && transaction.type_operation !== "approvisionnement_unites" && transaction.commission_reelle == null).length;
   const volumeTotal = dayTransactions.filter((transaction) => !transaction.annulee_le)
     .reduce((sum, transaction) => sum + Number(transaction.montant || 0), 0);
   const closedWithDifference = sessionSummaries.filter(({ session, totals }) => session.statut === "cloturee"
-    && (Number(totals.cashVariance || 0) !== 0 || Number(totals.floatVariance || 0) !== 0));
+    && (Number(totals.cashVariance || 0) !== 0 || totals.floatHasDifference || totals.unitHasDifference || !totals.unitTracked));
   const expensesTotal = dayExpenses.reduce((sum, expense) => sum + Number(expense.montant || 0), 0);
   const resultEstimate = commissionDeclaredTotal - expensesTotal;
 
@@ -365,6 +366,14 @@ function App() {
   async function saveTransaction(payload) {
     const session = ownOpenSessions.find((item) => item.id === payload.session_id);
     if (!session) throw new Error("Ouvrez d'abord une session de caisse avec votre compte agent.");
+    if (payload.type_operation === "approvisionnement_unites" || payload.type_operation === "transfert_unites") {
+      const totals = sessionSummaries.find(({ session: item }) => item.id === payload.session_id)?.totals;
+      if (!totals?.unitTracked) throw new Error("Le stock initial n'est pas suivi sur cette ancienne session. Clôturez-la, puis ouvrez une nouvelle session avec le stock de départ.");
+      if (payload.type_operation === "transfert_unites") {
+        const available = totals.unitMap[payload.operateur_code]?.theorique || 0;
+        if (Number(payload.montant) > available) throw new Error(`Stock insuffisant pour cet opérateur : disponible ${formatMoney(available)}.`);
+      }
+    }
     const row = {
       ...payload,
       agence_id: workspace.agency.id,
@@ -420,9 +429,12 @@ function App() {
       const floats = Object.entries(payload.soldes).map(([operateur_code, solde_ouverture]) => ({
         session_id: sessionId, operateur_code, solde_ouverture, solde_cloture_declare: null,
       }));
-      updateDemo((previous) => ({ ...previous, sessions: [session, ...previous.sessions], session_floats: [...previous.session_floats, ...floats] }));
+      const units = Object.entries(payload.unites).map(([operateur_code, unites_ouverture]) => ({
+        session_id: sessionId, operateur_code, unites_ouverture, unites_cloture_declare: null, stock_initial_non_saisi: false,
+      }));
+      updateDemo((previous) => ({ ...previous, sessions: [session, ...previous.sessions], session_floats: [...previous.session_floats, ...floats], session_units: [...(previous.session_units || []), ...units] }));
     } else {
-      sessionId = await openCashSession({ pointId: payload.point_id, date: selectedDate, cashOpening: payload.caisse_ouverture, openingBalances: payload.soldes });
+      sessionId = await openCashSession({ pointId: payload.point_id, date: selectedDate, cashOpening: payload.caisse_ouverture, openingBalances: payload.soldes, unitOpeningBalances: payload.unites });
       await refreshAfterSave();
     }
     setSelectedSessionId(sessionId);
@@ -430,6 +442,9 @@ function App() {
   }
 
   async function saveCloseSession(payload) {
+    if (!ownOpenSessions.some((session) => session.id === payload.session_id)) {
+      throw new Error("Vous ne pouvez clôturer et compter que votre propre session.");
+    }
     if (workspace.demo) {
       updateDemo((previous) => ({
         ...previous,
@@ -443,9 +458,18 @@ function App() {
           ...row,
           solde_cloture_declare: payload.soldes[row.operateur_code],
         } : row),
+        session_units: [
+          ...(previous.session_units || []).map((row) => row.session_id === payload.session_id ? {
+            ...row,
+            unites_cloture_declare: payload.unites[row.operateur_code],
+          } : row),
+          ...Object.entries(payload.unites)
+            .filter(([operateur_code]) => !(previous.session_units || []).some((row) => row.session_id === payload.session_id && row.operateur_code === operateur_code))
+            .map(([operateur_code, unites_cloture_declare]) => ({ session_id: payload.session_id, operateur_code, unites_ouverture: unites_cloture_declare, unites_cloture_declare, stock_initial_non_saisi: true })),
+        ],
       }));
     } else {
-      await closeCashSession({ sessionId: payload.session_id, cashDeclared: payload.caisse_declaree, declaredBalances: payload.soldes });
+      await closeCashSession({ sessionId: payload.session_id, cashDeclared: payload.caisse_declaree, declaredBalances: payload.soldes, declaredUnitBalances: payload.unites });
       await refreshAfterSave();
     }
     setNotice({ type: "success", text: "Clôture enregistrée. Consultez les écarts déclarés / théoriques." });
@@ -515,11 +539,11 @@ function App() {
   async function shareDailyReport() {
     const selectedPoint = pointFilter === "tous" ? "Tous les points" : pointById.get(pointFilter)?.nom || "Point";
     const cashLines = selectedSummary
-      ? `Caisse théorique : ${formatMoney(selectedSummary.cashExpected)}\nFloat électronique théorique : ${formatMoney(selectedSummary.floatExpected)}`
+      ? `Caisse théorique : ${formatMoney(selectedSummary.cashExpected)}\nFloat électronique théorique : ${formatMoney(selectedSummary.floatExpected)}\nStock unités théorique : ${selectedSummary.unitTracked ? formatMoney(selectedSummary.unitExpected) : "non suivi"}`
       : "Aucune session de caisse sélectionnée.";
     const varianceLines = selectedSummary?.cashVariance == null
-      ? "Écart : à confirmer à la clôture"
-      : `Écart espèces : ${formatMoney(selectedSummary.cashVariance)}\nÉcart float : ${formatMoney(selectedSummary.floatVariance)}`;
+      ? "Écarts : à confirmer à la clôture"
+      : `Écart espèces : ${formatMoney(selectedSummary.cashVariance)}\nÉcart float : ${formatMoney(selectedSummary.floatVariance)}\n${selectedSummary.unitTracked ? `Écart stock unités : ${formatMoney(selectedSummary.unitVariance)}` : "Écart stock unités : non calculable"}`;
     const report = [
       `KAISSE PRO — RAPPORT ${selectedDate}`,
       `${workspace.agency.nom} · ${selectedPoint}`,
@@ -548,7 +572,7 @@ function App() {
   function exportCsv(transactions = reportTransactions) {
     const sessionById = new Map((workspace?.report_sessions || workspace?.sessions || []).map((session) => [session.id, session]));
     const rows = [
-      ["Date", "Heure", "Point", "Agent", "Type", "Opérateur", "Destination", "Montant FCFA", "Commission estimée FCFA", "Commission réelle FCFA", "Référence", "Statut"],
+      ["Date", "Heure", "Point", "Agent", "Type", "Opérateur", "Destination", "Montant FCFA", "Règlement unités", "Commission estimée FCFA", "Commission réelle FCFA", "Référence", "Statut"],
       ...transactions.map((transaction) => [
         sessionById.get(transaction.session_id)?.date_caisse || selectedDate,
         formatTime(transaction.created_at),
@@ -558,6 +582,9 @@ function App() {
         operatorByCode.get(transaction.operateur_code)?.nom || transaction.operateur_code,
         operatorByCode.get(transaction.operateur_destination_code)?.nom || "",
         transaction.montant,
+        transaction.type_operation === "approvisionnement_unites" || transaction.type_operation === "transfert_unites"
+          ? (transaction.mode_paiement_unites === "wallet" ? `Float ${operatorByCode.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code || ""}` : "Espèces")
+          : "",
         transaction.commission_estimee,
         transaction.commission_reelle ?? "",
         transaction.reference || "",
@@ -592,8 +619,12 @@ function App() {
       const destination = operatorByCode.get(transaction.operateur_destination_code);
       const canceled = Boolean(transaction.annulee_le);
       const commission = transaction.commission_reelle ?? transaction.commission_estimee;
-      const commissionEstimated = transaction.commission_reelle == null;
-      return `<tr class="${canceled ? "cancelled" : ""}"><td>${escapeHtml(formatDate(session?.date_caisse || selectedDate))}</td><td>${escapeHtml(formatTime(transaction.created_at))}</td><td>${escapeHtml(OPERATION_LABELS[transaction.type_operation] || transaction.type_operation)}${destination ? ` → ${escapeHtml(destination.nom)}` : ""}</td><td>${escapeHtml(operator?.nom || transaction.operateur_code)}</td><td class="num">${escapeHtml(formatMoney(transaction.montant))}</td><td class="num">${escapeHtml(formatMoney(commission))}${commissionEstimated ? " <small>(estimée)</small>" : ""}</td><td>${escapeHtml(`${agent?.prenom || ""} ${agent?.nom || ""}`.trim() || "Agent")}</td><td>${escapeHtml(transaction.reference || "—")}</td><td>${canceled ? `Annulée — ${escapeHtml(transaction.motif_annulation || "")}` : "Validée"}</td></tr>`;
+      const commissionEstimated = transaction.type_operation !== "approvisionnement_unites" && transaction.commission_reelle == null;
+      const settlement = transaction.type_operation === "approvisionnement_unites" || transaction.type_operation === "transfert_unites"
+        ? (transaction.mode_paiement_unites === "wallet" ? `Float ${operatorByCode.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code || ""}` : "Espèces")
+        : "—";
+      const commissionLabel = transaction.type_operation === "approvisionnement_unites" ? "—" : formatMoney(commission);
+      return `<tr class="${canceled ? "cancelled" : ""}"><td>${escapeHtml(formatDate(session?.date_caisse || selectedDate))}</td><td>${escapeHtml(formatTime(transaction.created_at))}</td><td>${escapeHtml(OPERATION_LABELS[transaction.type_operation] || transaction.type_operation)}${destination ? ` → ${escapeHtml(destination.nom)}` : ""}</td><td>${escapeHtml(operator?.nom || transaction.operateur_code)}</td><td class="num">${escapeHtml(formatMoney(transaction.montant))}</td><td>${escapeHtml(settlement)}</td><td class="num">${escapeHtml(commissionLabel)}${commissionEstimated ? " <small>(estimée)</small>" : ""}</td><td>${escapeHtml(`${agent?.prenom || ""} ${agent?.nom || ""}`.trim() || "Agent")}</td><td>${escapeHtml(transaction.reference || "—")}</td><td>${canceled ? `Annulée — ${escapeHtml(transaction.motif_annulation || "")}` : "Validée"}</td></tr>`;
     }).join("");
     const periodLabel = reportRange.startDate === reportRange.endDate
       ? formatDate(reportRange.endDate)
@@ -601,7 +632,7 @@ function App() {
     const selectedPoint = pointFilter === "tous" ? "Tous les points" : pointById.get(pointFilter)?.nom || "Point";
     const printDocument = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Rapport Kaisse — ${escapeHtml(periodLabel)}</title><style>
       *{box-sizing:border-box}body{font:12px Arial,sans-serif;color:#182f38;margin:28px}h1{font-size:22px;margin:0 0 4px}p{color:#637379;margin:4px 0 18px}.summary{display:flex;gap:20px;padding:12px 14px;background:#f3f6f2;border-radius:8px;margin-bottom:18px}.summary strong{display:block;font-size:15px;margin-top:4px}table{border-collapse:collapse;width:100%;font-size:9px}th{text-align:left;background:#17333d;color:#fff;padding:8px 6px}td{padding:7px 6px;border-bottom:1px solid #e7eae6;vertical-align:top}.num{text-align:right;white-space:nowrap}.cancelled{color:#8d594c;background:#fff8f4}small{color:#8c7a53}footer{margin-top:18px;padding-top:9px;border-top:1px solid #ddd;color:#6e7d81;font-size:9px}@page{size:landscape;margin:12mm}@media print{body{margin:0}button{display:none}}
-      </style></head><body><h1>Kaisse — rapport des opérations</h1><p>${escapeHtml(agency.nom)} · ${escapeHtml(periodLabel)} · ${escapeHtml(selectedPoint)} · filtres période/type/opérateur/agent appliqués</p><div class="summary"><div>Opérations validées<strong>${valid.length}</strong></div><div>Volume validé<strong>${escapeHtml(formatMoney(totalVolume))}</strong></div><div>Commissions déclarées/estimées<strong>${escapeHtml(formatMoney(totalCommissions))}</strong></div><div>Lignes exportées<strong>${transactions.length}</strong></div></div><table><thead><tr><th>Date</th><th>Heure</th><th>Type</th><th>Opérateur</th><th>Montant</th><th>Commission</th><th>Agent</th><th>Référence</th><th>Statut</th></tr></thead><tbody>${bodyRows || `<tr><td colspan="9">Aucune opération pour cette sélection.</td></tr>`}</tbody></table><footer>Rapport généré par Kaisse. Les montants proviennent des saisies manuelles de l'agence et ne sont pas vérifiés par une API opérateur.</footer></body></html>`;
+      </style></head><body><h1>Kaisse — rapport des opérations</h1><p>${escapeHtml(agency.nom)} · ${escapeHtml(periodLabel)} · ${escapeHtml(selectedPoint)} · filtres période/type/opérateur/agent appliqués</p><div class="summary"><div>Opérations validées<strong>${valid.length}</strong></div><div>Volume validé<strong>${escapeHtml(formatMoney(totalVolume))}</strong></div><div>Commissions déclarées/estimées<strong>${escapeHtml(formatMoney(totalCommissions))}</strong></div><div>Lignes exportées<strong>${transactions.length}</strong></div></div><table><thead><tr><th>Date</th><th>Heure</th><th>Type</th><th>Opérateur</th><th>Montant</th><th>Règlement unités</th><th>Commission</th><th>Agent</th><th>Référence</th><th>Statut</th></tr></thead><tbody>${bodyRows || `<tr><td colspan="10">Aucune opération pour cette sélection.</td></tr>`}</tbody></table><footer>Rapport généré par Kaisse. Les montants proviennent des saisies manuelles de l'agence et ne sont pas vérifiés par une API opérateur.</footer></body></html>`;
     printWindow.document.open();
     printWindow.document.write(printDocument);
     printWindow.document.close();
@@ -763,10 +794,9 @@ function App() {
             summaries={selectableSessions}
             selectedSessionId={selectedSessionId}
             onSessionChange={setSelectedSessionId}
-            floats={workspace.session_floats || []}
+            units={workspace.session_units || []}
             expenses={dayExpenses}
             agents={agentById}
-            canManage={canManage}
             canWrite={subscription.canWrite}
             onOpenModal={setModal}
             onOpenOwnSession={() => setModal("open-session")}
@@ -819,6 +849,7 @@ function App() {
 
       {modal === "transaction" && <TransactionModal
         sessions={ownOpenSessions}
+        summaries={sessionSummaries}
         points={visiblePoints}
         operators={operatorOrder}
         rules={workspace.commission_baremes || []}
@@ -846,6 +877,7 @@ function App() {
         summary={currentSummary}
         operators={operatorOrder}
         floats={workspace.session_floats || []}
+        units={workspace.session_units || []}
         onClose={() => setModal("")}
         onSave={saveCloseSession}
       />}
@@ -900,7 +932,7 @@ function LandingPage({ onDemo, onLogin }) {
       <section className="landing-value">
         <div className="section-heading"><span>LE MVP, SANS LE SUPERFLU</span><h2>Le cahier devient un journal vérifiable.</h2><p>Un seul flux pour l'ouverture, les opérations, les dépenses et la clôture. Les soldes restent saisis par l'équipe et comparés à un théorique explicite.</p></div>
         <div className="value-grid">
-          <FeatureCard icon={ArrowLeftRight} number="01" title="Enregistrer l'opération" text="Dépôt, retrait, transfert entre opérateurs et achat de crédit. Chaque ligne est datée et attribuée à un agent." />
+          <FeatureCard icon={ArrowLeftRight} number="01" title="Enregistrer l'opération" text="Dépôts, retraits, transferts de float et stock d'unités séparé, avec approvisionnements et ventes client attribués à la session." />
           <FeatureCard icon={HandCoins} number="02" title="Voir les commissions" text="Barèmes configurables par agence ou saisie manuelle. Estimé et montant réel restent séparés." />
           <FeatureCard icon={ShieldCheck} number="03" title="Rapprocher la caisse" text="Déclarez les espèces et chaque solde électronique à l'ouverture et à la fermeture." />
           <FeatureCard icon={Users} number="04" title="Suivre les agents" text="Chaque session et chaque opération sont associées à un profil et à un point." />
@@ -958,7 +990,7 @@ function AuthPage({ configured, error, message, onSubmit, onDemo, onBack }) {
     <main className="auth-page">
       <section className="auth-panel auth-visual">
         <button className="back-link light-back" onClick={onBack}>← Retour à l'accueil</button>
-        <div className="auth-visual-content"><LogoMark light /><span className="auth-overline">UN MEILLEUR CONTRÔLE, CHAQUE JOUR</span><h1>Les chiffres de votre point, enfin réunis.</h1><p>Transactions, commissions, caisse physique et float électronique dans le même espace de travail.</p><div className="auth-benefits"><span><CheckCircle2 size={16} /> Une saisie attribuée à chaque agent</span><span><CheckCircle2 size={16} /> Un rapprochement lisible à la clôture</span><span><CheckCircle2 size={16} /> Vos taux restent configurables</span></div></div>
+        <div className="auth-visual-content"><LogoMark light /><span className="auth-overline">UN MEILLEUR CONTRÔLE, CHAQUE JOUR</span><h1>Les chiffres de votre point, enfin réunis.</h1><p>Transactions, commissions, caisse physique, float électronique et stock d'unités distinct par opérateur.</p><div className="auth-benefits"><span><CheckCircle2 size={16} /> Une saisie attribuée à chaque agent</span><span><CheckCircle2 size={16} /> Un rapprochement lisible à la clôture</span><span><CheckCircle2 size={16} /> Vos taux restent configurables</span></div></div>
         <div className="auth-footnote">Le solde théorique dépend des opérations saisies. Il ne s'agit pas d'une confirmation par Orange, MTN, Moov ou Wave.</div>
       </section>
       <section className="auth-panel auth-form-panel">
@@ -1023,6 +1055,11 @@ function OverviewPage({
   const selectedPoint = selectedSession ? pointById.get(selectedSession.point_id) : null;
   const floatBelowThreshold = selectedPoint && selectedSummary
     && selectedSummary.floatExpected < Number(selectedPoint.seuil_alerte_float || 0);
+  const sessionFullyReconciled = selectedSummary
+    && Number(selectedSummary.cashVariance || 0) === 0
+    && !selectedSummary.floatHasDifference
+    && selectedSummary.unitTracked
+    && !selectedSummary.unitHasDifference;
 
   return (
     <main className="content-area">
@@ -1040,11 +1077,11 @@ function OverviewPage({
         {!ownOpen && isToday && canWrite && <button className="button button-gold" onClick={onOpenOwnSession}><Plus size={15} />Ouvrir ma caisse</button>}
       </div>
 
-      {closedWithDifference.length > 0 && <div className="alert-card"><div className="alert-mark"><AlertTriangle size={18} /></div><div><strong>{closedWithDifference.length} clôture{closedWithDifference.length > 1 ? "s" : ""} avec un écart à vérifier</strong><span>Un écart négatif correspond à un montant déclaré inférieur au théorique. Vérifiez les opérations, dépenses et comptages avant toute conclusion.</span></div><button className="text-button" onClick={() => onGo("caisse")}>Voir la caisse <ArrowRight size={15} /></button></div>}
+      {closedWithDifference.length > 0 && <div className="alert-card"><div className="alert-mark"><AlertTriangle size={18} /></div><div><strong>{closedWithDifference.length} clôture{closedWithDifference.length > 1 ? "s" : ""} à vérifier</strong><span>Un écart négatif correspond à un montant déclaré inférieur au théorique. Vérifiez les opérations et les comptages espèces, float et unités; certaines anciennes sessions peuvent ne pas avoir de stock initial suivi.</span></div><button className="text-button" onClick={() => onGo("caisse")}>Voir la caisse <ArrowRight size={15} /></button></div>}
       {floatBelowThreshold && <div className="alert-card low-float-alert"><div className="alert-mark"><Smartphone size={18} /></div><div><strong>Float sous le seuil configuré pour {selectedPoint.nom}</strong><span>Solde théorique : {formatMoney(selectedSummary.floatExpected)} · seuil saisi par votre agence : {formatMoney(selectedPoint.seuil_alerte_float)}. Vérifiez les soldes directement auprès des opérateurs.</span></div></div>}
 
       <div className="kpi-grid">
-        <KpiCard label="Volume d'opérations" value={formatMoney(volume)} hint={`${transactions.filter((item) => !item.annulee_le).length} opérations · dépôts, retraits, transferts et crédits`} icon={Activity} tone="blue" />
+        <KpiCard label="Volume d'opérations" value={formatMoney(volume)} hint={`${transactions.filter((item) => !item.annulee_le).length} opérations · float, crédit et mouvements d'unités`} icon={Activity} tone="blue" />
         <KpiCard label="Commissions déclarées" value={formatMoney(commissions)} hint={commissionNeedsReview ? `${commissionNeedsReview} opération${commissionNeedsReview > 1 ? "s" : ""} sans montant réel saisi` : `Estimées : ${formatMoney(commissionEstimate)}`} icon={HandCoins} tone="gold" />
         <KpiCard label="Float électronique théorique" value={selectedSummary ? formatMoney(selectedSummary.floatExpected) : "—"} hint={selectedSession?.statut === "cloturee" ? `Déclaré : ${formatMoney(selectedSummary?.floatDeclared)}` : "Solde d'ouverture + opérations - dépenses wallet"} icon={Smartphone} tone="teal" />
         <KpiCard label="Espèces théoriques" value={selectedSummary ? formatMoney(selectedSummary.cashExpected) : "—"} hint={selectedSummary?.cashVariance == null ? "Le montant réel sera confirmé à la clôture" : `Écart déclaré : ${formatMoney(selectedSummary.cashVariance)}`} icon={Banknote} tone={selectedSummary?.cashVariance && selectedSummary.cashVariance !== 0 ? "red" : "ink"} />
@@ -1058,7 +1095,7 @@ function OverviewPage({
         </section>
 
         <section className="panel reconciliation-panel">
-          <div className="panel-heading"><div><h2>Où est l'argent ?</h2><p>{selectedSession ? `Session de ${agentById.get(selectedSession.agent_id)?.prenom || "l'agent"}` : "Sélectionnez une session"}</p></div><div className={`reconcile-status ${selectedSession?.statut === "cloturee" ? (Number(selectedSummary?.cashVariance || 0) === 0 && Number(selectedSummary?.floatVariance || 0) === 0 ? "good" : "warning") : "pending"}`}>{selectedSession?.statut === "cloturee" ? (Number(selectedSummary?.cashVariance || 0) === 0 && Number(selectedSummary?.floatVariance || 0) === 0 ? "Rapproché" : "À vérifier") : "En cours"}</div></div>
+          <div className="panel-heading"><div><h2>Où est l'argent ?</h2><p>{selectedSession ? `Session de ${agentById.get(selectedSession.agent_id)?.prenom || "l'agent"}` : "Sélectionnez une session"}</p></div><div className={`reconcile-status ${selectedSession?.statut === "cloturee" ? (sessionFullyReconciled ? "good" : "warning") : "pending"}`}>{selectedSession?.statut === "cloturee" ? (!selectedSummary?.unitTracked ? "Stock non suivi" : sessionFullyReconciled ? "Rapproché" : "À vérifier") : "En cours"}</div></div>
           {selectedSession && selectedSummary ? <>
             <BalanceLine icon={Banknote} label="Espèces" amount={selectedSummary.cashExpected} declared={selectedSummary.cashDeclared} variance={selectedSummary.cashVariance} closed={selectedSession.statut === "cloturee"} />
             <div className="balance-divider" />
@@ -1068,7 +1105,9 @@ function OverviewPage({
               const declared = selectedSession.statut === "cloturee" ? row.declare : null;
               return <BalanceLine key={operator.code} operator={operator} label={operator.nom} amount={row.theorique} declared={declared} variance={declared == null ? null : declared - row.theorique} closed={selectedSession.statut === "cloturee"} />;
             })}
-            <div className="formula-note"><span>Solde théorique = ouverture + mouvements saisis − dépenses</span><button className="text-button" onClick={() => onGo("caisse")}>Détails <ArrowRight size={14} /></button></div>
+            <div className="balance-divider" />
+            {selectedSummary.unitTracked ? <BalanceLine icon={Smartphone} label="Stock d'unités (valeur FCFA)" amount={selectedSummary.unitExpected} declared={selectedSummary.unitDeclared} variance={selectedSummary.unitVariance} closed={selectedSession.statut === "cloturee"} /> : <div className="formula-note"><span>Stock d'unités non suivi sur cette ancienne session; aucun écart historique n'est calculé.</span></div>}
+            <div className="formula-note"><span>Solde = ouverture + mouvements saisis − dépenses · le stock est suivi séparément du float</span><button className="text-button" onClick={() => onGo("caisse")}>Détails <ArrowRight size={14} /></button></div>
           </> : <div className="empty-state compact"><Wallet size={22} /><p>Ouvrez une session pour suivre une caisse et ses soldes de départ.</p>{canWrite && <button className="button button-gold" onClick={onOpenOwnSession}>Ouvrir une caisse</button>}</div>}
         </section>
       </div>
@@ -1127,7 +1166,7 @@ function OperationsPage({ date, reportRange, period, onPeriodChange, transaction
         <div><span>Sessions de la période</span><strong>{sessionCount}</strong></div>
         <div><span>Lignes filtrées</span><strong>{filteredRows.length}</strong></div>
         <div><span>Volume validé</span><strong>{formatMoney(volume)}</strong></div>
-        <div><span>Commissions à vérifier</span><strong>{validRows.filter((row) => row.commission_reelle == null).length}</strong></div>
+        <div><span>Commissions à vérifier</span><strong>{validRows.filter((row) => row.type_operation !== "approvisionnement_unites" && row.commission_reelle == null).length}</strong></div>
       </div>
       <section className="panel table-panel">
         <div className="panel-heading">
@@ -1154,10 +1193,10 @@ function TransactionTable({ rows, operators, points, agents, canManage, onCancel
     return <tr key={transaction.id} className={canceled ? "cancelled-row" : ""}>
       {showDate && <td>{formatDate(sessionDateById.get(transaction.session_id))}</td>}
       <td className="time-cell">{formatTime(transaction.created_at)}</td>
-      <td><div className="operation-cell"><strong>{OPERATION_LABELS[transaction.type_operation] || transaction.type_operation}</strong>{destination && <small>Vers {destination.nom}</small>}{canceled && <small className="cancel-note">Annulée · {transaction.motif_annulation}</small>}</div></td>
+      <td><div className="operation-cell"><strong>{OPERATION_LABELS[transaction.type_operation] || transaction.type_operation}</strong>{destination && <small>Vers {destination.nom}</small>}{(transaction.type_operation === "approvisionnement_unites" || transaction.type_operation === "transfert_unites") && <small>Règlement : {transaction.mode_paiement_unites === "wallet" ? `float ${operators.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code}` : "espèces"}</small>}{canceled && <small className="cancel-note">Annulée · {transaction.motif_annulation}</small>}</div></td>
       <td><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator?.couleur || "#95a0a6" }} />{operator?.nom || transaction.operateur_code}</span></td>
       <td className="amount-cell">{formatMoney(transaction.montant)}</td>
-      <td><div className="commission-cell">{commission == null ? <><strong>{formatMoney(transaction.commission_estimee)}</strong><small>estimée · à vérifier</small></> : <><strong>{formatMoney(commission)}</strong><small>déclarée</small></>}</div></td>
+      <td><div className="commission-cell">{transaction.type_operation === "approvisionnement_unites" ? <strong>—</strong> : commission == null ? <><strong>{formatMoney(transaction.commission_estimee)}</strong><small>estimée · à vérifier</small></> : <><strong>{formatMoney(commission)}</strong><small>déclarée</small></>}</div></td>
       <td><div className="operation-cell"><strong>{agent ? `${agent.prenom} ${agent.nom}`.trim() : "Agent"}</strong><small>{points.get(transaction.point_id)?.nom || "Point"}</small></div></td>
       <td className="reference-cell">{transaction.reference || "—"}</td>
       {canManage && <td>{!canceled && <button className="row-action" title="Annuler avec un motif" onClick={() => onCancel(transaction)}>Annuler</button>}</td>}
@@ -1165,23 +1204,36 @@ function TransactionTable({ rows, operators, points, agents, canManage, onCancel
   })}</tbody></table></div>;
 }
 
-function CashPage({ date, isHistorical, user, points, operators, selectedSession, selectedSummary, summaries, selectedSessionId, onSessionChange, floats, expenses, agents, canManage, canWrite, onOpenModal, onOpenOwnSession }) {
+function CashPage({ date, isHistorical, user, points, operators, selectedSession, selectedSummary, summaries, selectedSessionId, onSessionChange, units, expenses, agents, canWrite, onOpenModal, onOpenOwnSession }) {
   const ownOpen = summaries.some(({ session }) => session.agent_id === user.id && session.statut === "ouverte");
   const sessionExpenses = expenses.filter((expense) => expense.session_id === selectedSession?.id);
+  const sessionUnitRows = units.filter((row) => row.session_id === selectedSession?.id);
   const operatorRows = operators.map((operator) => ({ operator, balance: selectedSummary?.floatMap?.[operator.code] }));
   return (
     <main className="content-area">
-      <PageHeading eyebrow={`CAISSE · ${formatDate(date)}`} title="Caisse & clôture" description="Comparez les soldes théoriques aux montants réellement déclarés par l'agent." actions={<>{selectedSession?.statut === "ouverte" && canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Saisir une dépense</button>}{selectedSession?.statut === "ouverte" && (selectedSession.agent_id === user.id || canManage) && <button className="button button-dark" onClick={() => onOpenModal("close-session")}><CheckCircle2 size={16} />Clôturer la session</button>}{isHistorical && <span className="read-only-pill"><LockKeyhole size={14} />Historique en lecture</span>}</>} />
+      <PageHeading eyebrow={`CAISSE · ${formatDate(date)}`} title="Caisse & clôture" description="Comparez les soldes théoriques aux montants réellement déclarés par l'agent." actions={<>{selectedSession?.statut === "ouverte" && canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Saisir une dépense</button>}{selectedSession?.statut === "ouverte" && selectedSession.agent_id === user.id && <button className="button button-dark" onClick={() => onOpenModal("close-session")}><CheckCircle2 size={16} />Clôturer la session</button>}{isHistorical && <span className="read-only-pill"><LockKeyhole size={14} />Historique en lecture</span>}</>} />
       <div className="cash-toolbar"><div className="cash-toolbar-copy"><strong>Session sélectionnée</strong><span>Chaque session garde ses propres soldes d'ouverture et de clôture.</span></div><select value={selectedSessionId} onChange={(event) => onSessionChange(event.target.value)}><option value="">Aucune session</option>{summaries.map(({ session }) => <option key={session.id} value={session.id}>{points.find((point) => point.id === session.point_id)?.nom || "Point"} · {agents.get(session.agent_id)?.prenom || "Agent"} · {session.statut === "ouverte" ? "ouverte" : "clôturée"}</option>)}</select>{!ownOpen && !isHistorical && canWrite && <button className="button button-gold" onClick={onOpenOwnSession}><Plus size={15} />Ouvrir ma caisse</button>}</div>
       {selectedSession && selectedSummary ? <>
-        <div className="cash-status-card"><div className={`cash-status-icon ${selectedSession.statut === "cloturee" ? (selectedSummary.cashVariance === 0 && selectedSummary.floatVariance === 0 ? "done" : "issue") : "live"}`}>{selectedSession.statut === "cloturee" ? <CheckCircle2 size={19} /> : <Clock3 size={19} />}</div><div><strong>{selectedSession.statut === "cloturee" ? "Session clôturée" : "Session en cours"}</strong><span>{points.find((point) => point.id === selectedSession.point_id)?.nom || "Point"} · {agents.get(selectedSession.agent_id)?.prenom || "Agent"} {agents.get(selectedSession.agent_id)?.nom || ""} · {selectedSession.ouverte_le ? `ouverte à ${formatTime(selectedSession.ouverte_le)}` : ""}</span></div><div className="cash-status-right"><span>{selectedSession.statut === "cloturee" ? "Écart espèces" : "Espèces théoriques"}</span><strong className={selectedSummary.cashVariance < 0 ? "negative" : ""}>{selectedSession.statut === "cloturee" ? formatMoney(selectedSummary.cashVariance) : formatMoney(selectedSummary.cashExpected)}</strong></div></div>
+        <div className="cash-status-card"><div className={`cash-status-icon ${selectedSession.statut === "cloturee" ? (selectedSummary.cashVariance === 0 && !selectedSummary.floatHasDifference && selectedSummary.unitTracked && !selectedSummary.unitHasDifference ? "done" : "issue") : "live"}`}>{selectedSession.statut === "cloturee" ? <CheckCircle2 size={19} /> : <Clock3 size={19} />}</div><div><strong>{selectedSession.statut === "cloturee" ? "Session clôturée" : "Session en cours"}</strong><span>{points.find((point) => point.id === selectedSession.point_id)?.nom || "Point"} · {agents.get(selectedSession.agent_id)?.prenom || "Agent"} {agents.get(selectedSession.agent_id)?.nom || ""} · {selectedSession.ouverte_le ? `ouverte à ${formatTime(selectedSession.ouverte_le)}` : ""}</span></div><div className="cash-status-right"><span>{selectedSession.statut === "cloturee" ? "Écart espèces" : "Espèces théoriques"}</span><strong className={selectedSummary.cashVariance < 0 ? "negative" : ""}>{selectedSession.statut === "cloturee" ? formatMoney(selectedSummary.cashVariance) : formatMoney(selectedSummary.cashExpected)}</strong></div></div>
         <div className="cash-balance-grid">
           <section className="panel cash-balance-card"><div className="balance-card-heading"><div className="balance-large-icon cash-icon"><Banknote size={20} /></div><div><h2>Espèces en caisse</h2><p>Ouverture + mouvements en espèces − dépenses payées en espèces</p></div></div><div className="balance-numbers"><div><span>Solde théorique</span><strong>{formatMoney(selectedSummary.cashExpected)}</strong></div><div><span>Solde d'ouverture</span><strong>{formatMoney(selectedSession.caisse_ouverture)}</strong></div></div>{selectedSession.statut === "cloturee" && <VarianceBox declared={selectedSummary.cashDeclared} theoretical={selectedSummary.cashExpected} variance={selectedSummary.cashVariance} />}</section>
           <section className="panel cash-balance-card"><div className="balance-card-heading"><div className="balance-large-icon float-icon"><Smartphone size={20} /></div><div><h2>Float électronique</h2><p>Solde d'ouverture + opérations − dépenses wallet</p></div></div><div className="wallet-list">{operatorRows.map(({ operator, balance }) => balance && <div className="wallet-row" key={operator.code}><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator.couleur }} />{operator.nom}</span><div><strong>{formatMoney(balance.theorique)}</strong>{selectedSession.statut === "cloturee" && <small className={balance.declare === balance.theorique ? "positive" : "negative"}>Déclaré {formatMoney(balance.declare)} · écart {formatMoney((balance.declare || 0) - balance.theorique)}</small>}</div></div>)}</div></section>
         </div>
-        <div className="cash-bottom-grid"><section className="panel"><div className="panel-heading"><div><h2>Comptage à la clôture</h2><p>Déclarez ce qui a été compté, pas le montant attendu.</p></div>{selectedSession.statut === "ouverte" && (selectedSession.agent_id === user.id || canManage) && <button className="button button-dark" onClick={() => onOpenModal("close-session")}>Clôturer <ArrowRight size={15} /></button>}</div>{selectedSession.statut === "cloturee" ? <div className="variance-summary"><VarianceBox declared={selectedSummary.cashDeclared} theoretical={selectedSummary.cashExpected} variance={selectedSummary.cashVariance} /><div className="variance-footnote"><AlertTriangle size={15} />Un écart signale une différence à examiner; il ne prouve pas, à lui seul, une erreur ou une fraude.</div></div> : <div className="open-close-hint"><div className="hint-symbol"><Check size={17} /></div><div><strong>La session est ouverte</strong><span>À la fermeture, comptez les espèces et consultez chacun des soldes opérateur, puis enregistrez les montants déclarés.</span></div></div>}</section>
+        <section className="panel unit-stock-panel">
+          <div className="balance-card-heading"><div className="balance-large-icon unit-stock-icon"><Smartphone size={20} /></div><div><h2>Stock d'unités par opérateur</h2><p>Valeur faciale en FCFA · distincte du float électronique.</p></div><strong className="unit-stock-total">{selectedSummary.unitTracked ? formatMoney(selectedSummary.unitExpected) : "Non suivi"}</strong></div>
+          <div className="wallet-list">{operators.map((operator) => {
+            const balance = selectedSummary.unitMap[operator.code];
+            const opening = sessionUnitRows.find((row) => row.operateur_code === operator.code);
+            const variance = balance?.declare == null ? null : balance.declare - balance.theorique;
+            if (!balance) return null;
+            return <div className="wallet-row unit-stock-row" key={operator.code}><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator.couleur }} />{operator.nom}</span><div><strong>{balance.suivi ? formatMoney(balance.theorique) : "—"}</strong>{balance.suivi ? (selectedSession.statut === "cloturee" ? <small className={balance.declare === balance.theorique ? "positive" : "negative"}>Compté {formatMoney(balance.declare)} · écart {formatMoney((balance.declare || 0) - balance.theorique)}</small> : <small>Ouverture {formatMoney(opening?.unites_ouverture)}</small>) : <small className="unit-stock-untracked">{selectedSession.statut === "cloturee" ? `Clôture comptée ${formatMoney(balance.declare)} · écart non calculable` : "Stock initial non suivi · clôturez puis ouvrez une nouvelle session"}</small>}</div></div>;
+          })}</div>
+          {selectedSession.statut === "cloturee" && selectedSummary.unitTracked && <VarianceBox declared={selectedSummary.unitDeclared} theoretical={selectedSummary.unitExpected} variance={selectedSummary.unitVariance} />}
+          {selectedSession.statut === "cloturee" && selectedSummary.unitTracked && selectedSummary.unitHasDifference && selectedSummary.unitVariance === 0 && <div className="field-note"><AlertTriangle size={14} />Des écarts individuels entre opérateurs se compensent dans le total net; vérifiez les lignes ci-dessus.</div>}
+        </section>
+        <div className="cash-bottom-grid"><section className="panel"><div className="panel-heading"><div><h2>Comptage à la clôture</h2><p>Déclarez ce qui a été compté, pas le montant attendu.</p></div>{selectedSession.statut === "ouverte" && selectedSession.agent_id === user.id && <button className="button button-dark" onClick={() => onOpenModal("close-session")}>Clôturer <ArrowRight size={15} /></button>}</div>{selectedSession.statut === "cloturee" ? <div className="variance-summary"><VarianceBox declared={selectedSummary.cashDeclared} theoretical={selectedSummary.cashExpected} variance={selectedSummary.cashVariance} /><div className="variance-footnote"><AlertTriangle size={15} />Un écart signale une différence à examiner; il ne prouve pas, à lui seul, une erreur ou une fraude.</div></div> : <div className="open-close-hint"><div className="hint-symbol"><Check size={17} /></div><div><strong>La session est ouverte</strong><span>À la fermeture, comptez les espèces, consultez les soldes opérateur et comptez séparément le stock d'unités par opérateur.</span></div></div>}</section>
           <section className="panel expense-panel"><div className="panel-heading"><div><h2>Dépenses de la session</h2><p>Espèces et retraits sur wallet sont rapprochés séparément.</p></div>{selectedSession.statut === "ouverte" && selectedSession.agent_id === user.id && canWrite && <button className="icon-link" onClick={() => onOpenModal("expense")}><Plus size={15} />Ajouter</button>}</div>{sessionExpenses.length ? <div className="expense-list">{sessionExpenses.map((expense) => <div className="expense-row" key={expense.id}><span className="expense-icon"><TrendingDown size={15} /></span><div><strong>{expense.categorie}</strong><small>{expense.mode_paiement === "especes" ? "Espèces" : operators.find((operator) => operator.code === expense.operateur_code)?.nom} · {formatTime(expense.created_at)}</small></div><b>-{formatMoney(expense.montant)}</b></div>)}</div> : <div className="empty-inline">Aucune dépense déclarée.</div>}</section></div>
-      </> : <div className="panel empty-state"><Wallet size={26} /><strong>Aucune session à afficher pour cette date.</strong><span>Une session commence avec un point, une caisse physique et les quatre soldes électroniques d'ouverture.</span>{!isHistorical && canWrite && <button className="button button-dark" onClick={onOpenOwnSession}><Plus size={15} />Démarrer une session</button>}</div>}
+      </> : <div className="panel empty-state"><Wallet size={26} /><strong>Aucune session à afficher pour cette date.</strong><span>Une session commence avec un point, une caisse physique, les soldes électroniques et le stock initial d'unités par opérateur.</span>{!isHistorical && canWrite && <button className="button button-dark" onClick={onOpenOwnSession}><Plus size={15} />Démarrer une session</button>}</div>}
       <div className="ledger-footnote"><ShieldCheck size={17} /><span>Les commissions ne sont pas ajoutées automatiquement aux soldes de caisse : leur mode et délai d'encaissement varient. Elles sont suivies à part.</span></div>
     </main>
   );
@@ -1310,27 +1362,33 @@ function ModalActions({ onCancel, loading, label = "Enregistrer" }) {
   return <div className="modal-actions"><button type="button" className="button button-outline" onClick={onCancel} disabled={loading}>Annuler</button><button type="submit" className="button button-dark" disabled={loading}>{loading ? "Enregistrement…" : label}<ArrowRight size={15} /></button></div>;
 }
 
-function TransactionModal({ sessions, points, operators, rules, onClose, onSave }) {
+function TransactionModal({ sessions, points, operators, rules, summaries, onClose, onSave }) {
   const [type, setType] = useState("depot");
   const [sessionId, setSessionId] = useState(sessions[0]?.id || "");
   const [operatorCode, setOperatorCode] = useState(operators[0]?.code || "orange");
   const [destinationCode, setDestinationCode] = useState(operators[1]?.code || "mtn");
+  const [paymentMode, setPaymentMode] = useState("especes");
+  const [paymentOperatorCode, setPaymentOperatorCode] = useState(operators[0]?.code || "orange");
   const [amount, setAmount] = useState("");
   const [commissionActual, setCommissionActual] = useState("");
   const [reference, setReference] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const estimate = calculateCommission({ type_operation: type, operateur_code: operatorCode, montant: amount }, rules);
+  const isUnitMovement = type === "approvisionnement_unites" || type === "transfert_unites";
+  const isUnitSupply = type === "approvisionnement_unites";
+  const estimate = isUnitSupply ? 0 : calculateCommission({ type_operation: type, operateur_code: operatorCode, montant: amount }, rules);
   const selectedSession = sessions.find((session) => session.id === sessionId);
+  const selectedSummary = summaries.find(({ session }) => session.id === sessionId)?.totals;
 
   async function submit(event) {
     event.preventDefault();
     setError("");
     try {
       if (!sessionId) throw new Error("Vous n'avez pas de session ouverte avec ce compte.");
-      const money = safeAmount(amount, "Le montant");
+      const money = safeAmount(amount, isUnitMovement ? "La valeur des unités" : "Le montant");
       if (type === "transfert" && (!destinationCode || destinationCode === operatorCode)) throw new Error("Choisissez un opérateur de destination différent.");
-      const realCommission = commissionActual.trim() === "" ? null : safeAmount(commissionActual, "La commission", true);
+      if (isUnitMovement && paymentMode === "wallet" && !paymentOperatorCode) throw new Error("Choisissez l'opérateur utilisé pour le règlement.");
+      const realCommission = isUnitSupply ? 0 : (commissionActual.trim() === "" ? null : safeAmount(commissionActual, "La commission", true));
       setLoading(true);
       await onSave({
         session_id: sessionId,
@@ -1340,6 +1398,8 @@ function TransactionModal({ sessions, points, operators, rules, onClose, onSave 
         montant: money,
         commission_estimee: estimate,
         commission_reelle: realCommission,
+        mode_paiement_unites: isUnitMovement ? paymentMode : null,
+        operateur_paiement_code: isUnitMovement && paymentMode === "wallet" ? paymentOperatorCode : null,
         reference: reference.trim(),
         note: "",
       });
@@ -1355,19 +1415,46 @@ function TransactionModal({ sessions, points, operators, rules, onClose, onSave 
     {sessions.length ? <form className="modal-form" onSubmit={submit}>
       <FormField label="Session de caisse"><select value={sessionId} onChange={(event) => setSessionId(event.target.value)}>{sessions.map((session) => <option key={session.id} value={session.id}>{points.find((point) => point.id === session.point_id)?.nom || "Point"} · {formatTime(session.ouverte_le)}</option>)}</select></FormField>
       <div className="operation-type-picker">{OPERATION_TYPES.map((item) => <button type="button" key={item.code} className={type === item.code ? "active" : ""} onClick={() => setType(item.code)}>{item.label}</button>)}</div>
-      <div className="form-row"><FormField label="Opérateur"><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>{type === "transfert" && <FormField label="Opérateur destinataire"><select value={destinationCode} onChange={(event) => setDestinationCode(event.target.value)}>{operators.filter((operator) => operator.code !== operatorCode).map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}</div>
-      <FormField label="Montant (FCFA)"><input type="number" min="1" step="1" inputMode="numeric" required autoFocus value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Ex. 25 000" /></FormField>
-      <div className="commission-entry"><div><HandCoins size={16} /><span>Commission estimée</span><strong>{formatMoney(estimate)}</strong></div><FormField label="Commission réellement constatée (facultatif)"><input type="number" min="0" step="1" inputMode="numeric" value={commissionActual} onChange={(event) => setCommissionActual(event.target.value)} placeholder="Laisser vide si inconnue" /></FormField></div>
-      {!rules.some((rule) => rule.operateur_code === operatorCode && rule.type_operation === type) && <div className="field-note"><AlertTriangle size={14} />Aucun barème correspondant : l'estimation vaut 0. Vous pouvez la saisir dans Réglages.</div>}
+      <div className="form-row">
+        <FormField label={isUnitMovement ? "Opérateur du stock" : "Opérateur"}><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>
+        {type === "transfert" && <FormField label="Opérateur destinataire"><select value={destinationCode} onChange={(event) => setDestinationCode(event.target.value)}>{operators.filter((operator) => operator.code !== operatorCode).map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}
+      </div>
+      {isUnitMovement && <div className="form-row">
+        <FormField label={isUnitSupply ? "Approvisionnement payé depuis" : "Le client règle par"}><select value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)}><option value="especes">Espèces</option><option value="wallet">Float électronique</option></select></FormField>
+        {paymentMode === "wallet" && <FormField label={isUnitSupply ? "Opérateur débité" : "Opérateur crédité"}><select value={paymentOperatorCode} onChange={(event) => setPaymentOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}
+      </div>}
+      <FormField label={isUnitMovement ? "Valeur des unités (FCFA)" : "Montant (FCFA)"} hint={isUnitMovement ? "Saisissez la valeur faciale : le même montant ajuste stock et règlement." : undefined}><input type="number" min="1" step="1" inputMode="numeric" required autoFocus value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Ex. 25 000" /></FormField>
+      {!isUnitSupply && <div className="commission-entry"><div><HandCoins size={16} /><span>Commission estimée</span><strong>{formatMoney(estimate)}</strong></div><FormField label="Commission réellement constatée (facultatif)"><input type="number" min="0" step="1" inputMode="numeric" value={commissionActual} onChange={(event) => setCommissionActual(event.target.value)} placeholder="Laisser vide si inconnue" /></FormField></div>}
+      {!isUnitSupply && !rules.some((rule) => rule.operateur_code === operatorCode && rule.type_operation === type) && <div className="field-note"><AlertTriangle size={14} />Aucun barème correspondant : l'estimation vaut 0. Vous pouvez la saisir dans Réglages.</div>}
       <FormField label="Référence (facultatif)" hint="Évitez de saisir le numéro ou le nom du client."><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="N° reçu ou référence courte" /></FormField>
-      {selectedSession && <div className="movement-hint"><InfoLine type={type} operator={operators.find((operator) => operator.code === operatorCode)?.nom} destination={operators.find((operator) => operator.code === destinationCode)?.nom} /></div>}
+      {selectedSession && <div className="movement-hint"><InfoLine
+        type={type}
+        operator={operators.find((operator) => operator.code === operatorCode)?.nom}
+        destination={operators.find((operator) => operator.code === destinationCode)?.nom}
+        paymentMode={paymentMode}
+        paymentOperator={operators.find((operator) => operator.code === paymentOperatorCode)?.nom}
+      />{type === "transfert_unites" && selectedSummary?.unitTracked && <span>Stock disponible : {formatMoney(selectedSummary.unitMap[operatorCode]?.theorique || 0)}</span>}</div>}
+      {isUnitMovement && selectedSummary && !selectedSummary.unitTracked && <div className="field-note"><AlertTriangle size={14} />Stock initial non suivi sur cette ancienne session. Clôturez-la puis ouvrez une nouvelle session avant tout mouvement d'unités.</div>}
       <ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Enregistrer l'opération" />
     </form> : <div className="modal-empty"><Wallet size={25} /><strong>Aucune session ouverte pour votre compte.</strong><span>Ouvrez une caisse avant de saisir une opération.</span><button className="button button-dark" onClick={() => { onClose(); }}>Compris</button></div>}
   </ModalShell>;
 }
 
-function InfoLine({ type, operator, destination }) {
-  const message = type === "depot" ? "Espèces + · float opérateur −" : type === "retrait" ? "Espèces − · float opérateur +" : type === "achat_credit" ? "Espèces + · float opérateur −" : `Float ${operator} − · float ${destination} +`;
+function InfoLine({ type, operator, destination, paymentMode, paymentOperator }) {
+  let message;
+  if (type === "approvisionnement_unites" || type === "transfert_unites") {
+    const supply = type === "approvisionnement_unites";
+    const payment = paymentMode === "wallet" ? `float ${paymentOperator}` : "espèces";
+    message = `${supply ? "Décaissement" : "Encaissement"} ${payment} · stock ${operator} ${supply ? "+" : "−"}`;
+  } else if (type === "depot") {
+    message = "Espèces + · float opérateur −";
+  } else if (type === "retrait") {
+    message = "Espèces − · float opérateur +";
+  } else if (type === "achat_credit") {
+    message = "Espèces + · float opérateur −";
+  } else {
+    message = `Float ${operator} − · float ${destination} +`;
+  }
   return <><Activity size={14} /><span>{message}</span></>;
 }
 
@@ -1375,9 +1462,11 @@ function OpenSessionModal({ points, operators, selectedDate, isHistorical, onClo
   const [pointId, setPointId] = useState(points[0]?.id || "");
   const [cash, setCash] = useState("");
   const [balances, setBalances] = useState(Object.fromEntries(operators.map((operator) => [operator.code, ""])));
+  const [unitBalances, setUnitBalances] = useState(Object.fromEntries(operators.map((operator) => [operator.code, ""])));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   function changeBalance(code, value) { setBalances((current) => ({ ...current, [code]: value })); }
+  function changeUnitBalance(code, value) { setUnitBalances((current) => ({ ...current, [code]: value })); }
   async function submit(event) {
     event.preventDefault();
     setError("");
@@ -1385,37 +1474,67 @@ function OpenSessionModal({ points, operators, selectedDate, isHistorical, onClo
       if (isHistorical) throw new Error("Une session ne peut être ouverte que pour la date du jour.");
       if (!pointId) throw new Error("Créez d'abord un point de vente.");
       const openingBalances = Object.fromEntries(operators.map((operator) => [operator.code, safeAmount(balances[operator.code], `Le solde ${operator.nom}`, true)]));
+      const openingUnits = Object.fromEntries(operators.map((operator) => [operator.code, safeAmount(unitBalances[operator.code], `Le stock ${operator.nom}`, true)]));
       const cashOpening = safeAmount(cash, "Le solde espèces", true);
       setLoading(true);
-      await onSave({ point_id: pointId, date_caisse: selectedDate, caisse_ouverture: cashOpening, soldes: openingBalances });
+      await onSave({ point_id: pointId, date_caisse: selectedDate, caisse_ouverture: cashOpening, soldes: openingBalances, unites: openingUnits });
       onClose();
     } catch (saveError) { setError(makeErrorMessage(saveError)); } finally { setLoading(false); }
   }
-  return <ModalShell title="Ouvrir une session de caisse" subtitle="Saisissez les montants réellement disponibles au démarrage." onClose={onClose}>
-    {points.length ? <form className="modal-form" onSubmit={submit}><FormField label="Point de vente"><select value={pointId} onChange={(event) => setPointId(event.target.value)}>{points.map((point) => <option key={point.id} value={point.id}>{point.nom} · {point.ville}</option>)}</select></FormField><FormField label="Espèces réellement comptées (FCFA)"><input required type="number" min="0" step="1" inputMode="numeric" value={cash} onChange={(event) => setCash(event.target.value)} placeholder="Ex. 250 000" /></FormField><div className="modal-subheading"><Smartphone size={16} /><div><strong>Soldes électroniques d'ouverture</strong><span>Consultez chaque solde opérateur, puis saisissez-le.</span></div></div><div className="balance-input-grid">{operators.map((operator) => <FormField key={operator.code} label={operator.nom}><input required type="number" min="0" step="1" inputMode="numeric" value={balances[operator.code] || ""} onChange={(event) => changeBalance(operator.code, event.target.value)} placeholder="0" /></FormField>)}</div><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Ouvrir la caisse" /></form> : <div className="modal-empty"><Store size={24} /><strong>Aucun point disponible.</strong><span>Ajoutez d'abord un point dans Équipe & points.</span><button className="button button-outline" onClick={onClose}>Fermer</button></div>}
+  return <ModalShell title="Ouvrir une session de caisse" subtitle="Saisissez les montants et stocks réellement disponibles au démarrage." onClose={onClose}>
+    {points.length ? <form className="modal-form" onSubmit={submit}>
+      <FormField label="Point de vente"><select value={pointId} onChange={(event) => setPointId(event.target.value)}>{points.map((point) => <option key={point.id} value={point.id}>{point.nom} · {point.ville}</option>)}</select></FormField>
+      <FormField label="Espèces réellement comptées (FCFA)"><input required type="number" min="0" step="1" inputMode="numeric" value={cash} onChange={(event) => setCash(event.target.value)} placeholder="Ex. 250 000" /></FormField>
+      <div className="modal-subheading"><Smartphone size={16} /><div><strong>Soldes électroniques d'ouverture</strong><span>Consultez chaque solde opérateur, puis saisissez-le.</span></div></div>
+      <div className="balance-input-grid">{operators.map((operator) => <FormField key={operator.code} label={operator.nom}><input required type="number" min="0" step="1" inputMode="numeric" value={balances[operator.code] || ""} onChange={(event) => changeBalance(operator.code, event.target.value)} placeholder="0" /></FormField>)}</div>
+      <div className="modal-subheading unit-stock-subheading"><Smartphone size={16} /><div><strong>Stock initial d'unités téléphoniques</strong><span>Valeur faciale en FCFA, distincte du float électronique.</span></div></div>
+      <div className="balance-input-grid">{operators.map((operator) => <FormField key={operator.code} label={operator.nom}><input required type="number" min="0" step="1" inputMode="numeric" value={unitBalances[operator.code] || ""} onChange={(event) => changeUnitBalance(operator.code, event.target.value)} placeholder="0" /></FormField>)}</div>
+      <ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Ouvrir la caisse" />
+    </form> : <div className="modal-empty"><Store size={24} /><strong>Aucun point disponible.</strong><span>Ajoutez d'abord un point dans Équipe & points.</span><button className="button button-outline" onClick={onClose}>Fermer</button></div>}
   </ModalShell>;
 }
 
-function CloseSessionModal({ session, point, summary, operators, floats, onClose, onSave }) {
+function CloseSessionModal({ session, point, summary, operators, floats, units, onClose, onSave }) {
   const openFloatRows = floats.filter((row) => row.session_id === session.id);
+  const openUnitRows = units.filter((row) => row.session_id === session.id);
   const [cash, setCash] = useState("");
   const [balances, setBalances] = useState(Object.fromEntries(operators.map((operator) => [operator.code, ""])));
+  const [unitBalances, setUnitBalances] = useState(Object.fromEntries(operators.map((operator) => [operator.code, ""])));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   function changeBalance(code, value) { setBalances((current) => ({ ...current, [code]: value })); }
+  function changeUnitBalance(code, value) { setUnitBalances((current) => ({ ...current, [code]: value })); }
   async function submit(event) {
     event.preventDefault();
     setError("");
     try {
       const declaredBalances = Object.fromEntries(operators.map((operator) => [operator.code, safeAmount(balances[operator.code], `Le solde ${operator.nom}`, true)]));
+      const declaredUnits = Object.fromEntries(operators.map((operator) => [operator.code, safeAmount(unitBalances[operator.code], `Le stock ${operator.nom}`, true)]));
       const declaredCash = safeAmount(cash, "Le solde espèces", true);
       setLoading(true);
-      await onSave({ session_id: session.id, caisse_declaree: declaredCash, soldes: declaredBalances });
+      await onSave({ session_id: session.id, caisse_declaree: declaredCash, soldes: declaredBalances, unites: declaredUnits });
       onClose();
     } catch (saveError) { setError(makeErrorMessage(saveError)); } finally { setLoading(false); }
   }
-  return <ModalShell title="Clôturer la session" subtitle={`${point?.nom || "Point"} · comptez les espèces et consultez chaque portefeuille.`} onClose={onClose} wide>
-    <form className="modal-form" onSubmit={submit}><div className="closing-reference"><span>Théorique espèces</span><strong>{formatMoney(summary.cashExpected)}</strong><span>Théorique float total</span><strong>{formatMoney(summary.floatExpected)}</strong></div><FormField label="Espèces réellement comptées (FCFA)"><input required autoFocus type="number" min="0" step="1" inputMode="numeric" value={cash} onChange={(event) => setCash(event.target.value)} placeholder="Montant compté" /></FormField><div className="modal-subheading"><Smartphone size={16} /><div><strong>Soldes réellement affichés par opérateur</strong><span>Ne copiez pas les soldes théoriques : consultez les téléphones / comptes opérateur.</span></div></div><div className="balance-input-grid">{operators.map((operator) => { const opening = openFloatRows.find((row) => row.operateur_code === operator.code); const expected = summary.floatMap[operator.code]?.theorique || 0; return <FormField key={operator.code} label={operator.nom} hint={`Théorique : ${formatMoney(expected)} · ouverture ${formatMoney(opening?.solde_ouverture)}`}><input required type="number" min="0" step="1" inputMode="numeric" value={balances[operator.code] || ""} onChange={(event) => changeBalance(operator.code, event.target.value)} placeholder="Montant réellement déclaré" /></FormField>; })}</div><div className="closing-warning"><AlertTriangle size={15} /><span>Après clôture, aucune nouvelle opération ne pourra être ajoutée à cette session. Les écarts seront calculés automatiquement.</span></div><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Enregistrer la clôture" /></form>
+  return <ModalShell title="Clôturer la session" subtitle={`${point?.nom || "Point"} · comptez espèces, portefeuilles et unités.`} onClose={onClose} wide>
+    <form className="modal-form" onSubmit={submit}>
+      <div className="closing-reference"><span>Théorique espèces</span><strong>{formatMoney(summary.cashExpected)}</strong><span>Théorique float total</span><strong>{formatMoney(summary.floatExpected)}</strong><span>Stock unités théorique</span><strong>{summary.unitTracked ? formatMoney(summary.unitExpected) : "Non suivi"}</strong></div>
+      <FormField label="Espèces réellement comptées (FCFA)"><input required autoFocus type="number" min="0" step="1" inputMode="numeric" value={cash} onChange={(event) => setCash(event.target.value)} placeholder="Montant compté" /></FormField>
+      <div className="modal-subheading"><Smartphone size={16} /><div><strong>Soldes réellement affichés par opérateur</strong><span>Ne copiez pas les soldes théoriques : consultez les téléphones / comptes opérateur.</span></div></div>
+      <div className="balance-input-grid">{operators.map((operator) => { const opening = openFloatRows.find((row) => row.operateur_code === operator.code); const expected = summary.floatMap[operator.code]?.theorique || 0; return <FormField key={operator.code} label={operator.nom} hint={`Théorique : ${formatMoney(expected)} · ouverture ${formatMoney(opening?.solde_ouverture)}`}><input required type="number" min="0" step="1" inputMode="numeric" value={balances[operator.code] || ""} onChange={(event) => changeBalance(operator.code, event.target.value)} placeholder="Montant réellement déclaré" /></FormField>; })}</div>
+      <div className="modal-subheading unit-stock-subheading"><Smartphone size={16} /><div><strong>Stock d'unités réellement compté</strong><span>Déclarez la valeur faciale par opérateur ; l'écart sera calculé.</span></div></div>
+      <div className="balance-input-grid">{operators.map((operator) => {
+        const opening = openUnitRows.find((row) => row.operateur_code === operator.code);
+        const expected = summary.unitMap[operator.code]?.theorique || 0;
+        const tracked = Boolean(opening && !opening.stock_initial_non_saisi);
+        const hint = tracked
+          ? `Théorique : ${formatMoney(expected)} · ouverture ${formatMoney(opening.unites_ouverture)}`
+          : "Stock initial non suivi sur cette ancienne session; l'écart d'unités ne sera pas calculable.";
+        return <FormField key={operator.code} label={operator.nom} hint={hint}><input required type="number" min="0" step="1" inputMode="numeric" value={unitBalances[operator.code] || ""} onChange={(event) => changeUnitBalance(operator.code, event.target.value)} placeholder="Valeur réellement comptée" /></FormField>;
+      })}</div>
+      <div className="closing-warning"><AlertTriangle size={15} /><span>Après clôture, aucune nouvelle opération ne pourra être ajoutée à cette session. Les écarts espèces, float et unités seront calculés automatiquement.</span></div>
+      <ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Enregistrer la clôture" />
+    </form>
   </ModalShell>;
 }
 
@@ -1486,7 +1605,7 @@ function CommissionModal({ operators, onClose, onSave }) {
       onClose();
     } catch (saveError) { setError(makeErrorMessage(saveError)); } finally { setLoading(false); }
   }
-  return <ModalShell title="Configurer un barème" subtitle="Les taux sont saisis par votre agence; aucune commission officielle n'est préchargée." onClose={onClose} wide><form className="modal-form" onSubmit={submit}><div className="form-row"><FormField label="Opérateur"><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option value={operator.code} key={operator.code}>{operator.nom}</option>)}</select></FormField><FormField label="Type d'opération"><select value={operationType} onChange={(event) => setOperationType(event.target.value)}>{OPERATION_TYPES.map((operation) => <option value={operation.code} key={operation.code}>{operation.label}</option>)}</select></FormField></div><div className="form-row"><FormField label="Montant minimum (FCFA)"><input required type="number" min="0" step="1" value={minimum} onChange={(event) => setMinimum(event.target.value)} /></FormField><FormField label="Montant maximum (vide = sans plafond)"><input type="number" min="0" step="1" value={maximum} onChange={(event) => setMaximum(event.target.value)} /></FormField></div><div className="form-row"><FormField label="Commission fixe (FCFA)"><input required type="number" min="0" step="1" value={fixed} onChange={(event) => setFixed(event.target.value)} /></FormField><FormField label="Taux (points de base)" hint="100 points de base = 1 %."><input required type="number" min="0" max="10000" step="1" value={basisPoints} onChange={(event) => setBasisPoints(event.target.value)} /></FormField></div><FormField label="Source / date de vérification" hint="Ex. barème agence daté du 01/10/2026."><input value={source} onChange={(event) => setSource(event.target.value)} maxLength={160} placeholder="Indiquez le document ou la personne qui a confirmé le taux" /></FormField><div className="field-note"><AlertTriangle size={14} />Les règles peuvent avoir plusieurs tranches. Vérifiez qu'elles ne se chevauchent pas; le montant réel reste à déclarer sur chaque opération.</div><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Enregistrer le barème" /></form></ModalShell>;
+  return <ModalShell title="Configurer un barème" subtitle="Les taux sont saisis par votre agence; aucune commission officielle n'est préchargée." onClose={onClose} wide><form className="modal-form" onSubmit={submit}><div className="form-row"><FormField label="Opérateur"><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option value={operator.code} key={operator.code}>{operator.nom}</option>)}</select></FormField><FormField label="Type d'opération"><select value={operationType} onChange={(event) => setOperationType(event.target.value)}>{COMMISSION_OPERATION_TYPES.map((operation) => <option value={operation.code} key={operation.code}>{operation.label}</option>)}</select></FormField></div><div className="form-row"><FormField label="Montant minimum (FCFA)"><input required type="number" min="0" step="1" value={minimum} onChange={(event) => setMinimum(event.target.value)} /></FormField><FormField label="Montant maximum (vide = sans plafond)"><input type="number" min="0" step="1" value={maximum} onChange={(event) => setMaximum(event.target.value)} /></FormField></div><div className="form-row"><FormField label="Commission fixe (FCFA)"><input required type="number" min="0" step="1" value={fixed} onChange={(event) => setFixed(event.target.value)} /></FormField><FormField label="Taux (points de base)" hint="100 points de base = 1 %."><input required type="number" min="0" max="10000" step="1" value={basisPoints} onChange={(event) => setBasisPoints(event.target.value)} /></FormField></div><FormField label="Source / date de vérification" hint="Ex. barème agence daté du 01/10/2026."><input value={source} onChange={(event) => setSource(event.target.value)} maxLength={160} placeholder="Indiquez le document ou la personne qui a confirmé le taux" /></FormField><div className="field-note"><AlertTriangle size={14} />Les règles peuvent avoir plusieurs tranches. Vérifiez qu'elles ne se chevauchent pas; le montant réel reste à déclarer sur chaque opération.</div><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Enregistrer le barème" /></form></ModalShell>;
 }
 
 export default App;

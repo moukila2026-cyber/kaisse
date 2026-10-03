@@ -54,16 +54,19 @@ export async function loadWorkspace(userId, date, reportRange = { startDate: dat
   const sessionIds = sessions.map((session) => session.id);
   const reportSessionIds = reportSessions.map((session) => session.id);
   let sessionFloats = [];
+  let sessionUnits = [];
   let reportTransactions = [];
   let expenses = [];
 
   if (sessionIds.length) {
-    const [floatResult, expensesResult] = await Promise.all([
+    const [floatResult, expensesResult, unitResult] = await Promise.all([
       supabase.from("soldes_session_operateur").select("*").in("session_id", sessionIds),
       supabase.from("depenses").select("*").in("session_id", sessionIds).order("created_at", { ascending: false }),
+      supabase.from("soldes_session_unites").select("*").in("session_id", sessionIds),
     ]);
     sessionFloats = throwIfError(floatResult) || [];
     expenses = throwIfError(expensesResult) || [];
+    sessionUnits = throwIfError(unitResult) || [];
   }
 
   if (reportSessionIds.length) {
@@ -95,6 +98,7 @@ export async function loadWorkspace(userId, date, reportRange = { startDate: dat
     sessions,
     report_sessions: reportSessions,
     session_floats: sessionFloats,
+    session_units: sessionUnits,
     transactions,
     report_transactions: reportTransactions,
     expenses,
@@ -102,21 +106,23 @@ export async function loadWorkspace(userId, date, reportRange = { startDate: dat
   };
 }
 
-export async function openCashSession({ pointId, date, cashOpening, openingBalances }) {
-  const result = await supabase.rpc("ouvrir_session", {
+export async function openCashSession({ pointId, date, cashOpening, openingBalances, unitOpeningBalances }) {
+  const result = await supabase.rpc("ouvrir_session_avec_unites", {
     p_point_id: pointId,
     p_date_caisse: date,
     p_caisse_ouverture: Number(cashOpening),
     p_soldes: openingBalances,
+    p_unites: unitOpeningBalances,
   });
   return throwIfError(result);
 }
 
-export async function closeCashSession({ sessionId, cashDeclared, declaredBalances }) {
-  const result = await supabase.rpc("cloturer_session", {
+export async function closeCashSession({ sessionId, cashDeclared, declaredBalances, declaredUnitBalances }) {
+  const result = await supabase.rpc("cloturer_session_avec_unites", {
     p_session_id: sessionId,
     p_caisse_declaree: Number(cashDeclared),
     p_soldes: declaredBalances,
+    p_unites: declaredUnitBalances,
   });
   return throwIfError(result);
 }

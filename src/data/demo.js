@@ -92,6 +92,24 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
         session_id: closedSessionId, operateur_code, solde_ouverture, solde_cloture_declare,
       })),
     ],
+    session_units: [
+      ...[
+        ["orange", 50_000, null],
+        ["mtn", 30_000, null],
+        ["moov", 20_000, null],
+        ["wave", 15_000, null],
+      ].map(([operateur_code, unites_ouverture, unites_cloture_declare]) => ({
+        session_id: openingSessionId, operateur_code, unites_ouverture, unites_cloture_declare,
+      })),
+      ...[
+        ["orange", 20_000, 10_000],
+        ["mtn", 10_000, 10_000],
+        ["moov", 5_000, 5_000],
+        ["wave", 8_000, 8_000],
+      ].map(([operateur_code, unites_ouverture, unites_cloture_declare]) => ({
+        session_id: closedSessionId, operateur_code, unites_ouverture, unites_cloture_declare,
+      })),
+    ],
     transactions: [
       {
         id: "demo-tx-1", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
@@ -118,6 +136,20 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
         reference: "MV-0943", created_at: new Date(now - 80 * 60 * 1000).toISOString(), annulee_le: null,
       },
       {
+        id: "demo-tx-6", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, operateur_code: "orange", operateur_destination_code: null,
+        type_operation: "approvisionnement_unites", montant: 30_000, commission_estimee: 0, commission_reelle: 0,
+        mode_paiement_unites: "especes", operateur_paiement_code: null,
+        reference: "STK-0204", created_at: new Date(now - 12 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+      {
+        id: "demo-tx-7", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, operateur_code: "orange", operateur_destination_code: null,
+        type_operation: "transfert_unites", montant: 12_000, commission_estimee: 100, commission_reelle: 100,
+        mode_paiement_unites: "especes", operateur_paiement_code: null,
+        reference: "UNIT-8832", created_at: new Date(now - 8 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+      {
         id: "demo-tx-5", agence_id: "demo-agence", point_id: pointId, session_id: closedSessionId,
         agent_id: agentId, operateur_code: "orange", operateur_destination_code: null,
         type_operation: "retrait", montant: 20_000, commission_estimee: 100, commission_reelle: 100,
@@ -138,7 +170,10 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
 export function readDemoWorkspace() {
   try {
     const stored = localStorage.getItem(DEMO_DATA_KEY);
-    if (stored) return JSON.parse(stored);
+    if (stored) {
+      const workspace = JSON.parse(stored);
+      return { ...workspace, session_units: workspace.session_units || [] };
+    }
   } catch (error) {
     console.warn("Impossible de lire les données de démonstration.", error);
   }

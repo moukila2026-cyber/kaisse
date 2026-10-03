@@ -1,18 +1,19 @@
-# Supabase SQL Editor — installation sûre de Kaisse Pro + essai 14 jours
+# Supabase SQL Editor — installation sûre de Kaisse Pro, essai et stock d'unités
 
 ## Ce qu'il faut lancer
 
 Les scripts complets sont dans le dépôt :
 
-1. [`202610030001_kaisse_pro_v1.sql`](../supabase/migrations/202610030001_kaisse_pro_v1.sql) — tables, relations, Auth, RLS et fonctions d'ouverture/clôture.
-2. [`202610030002_essai_14_jours.sql`](../supabase/migrations/202610030002_essai_14_jours.sql) — migration additive de l'essai 14 jours et du mode lecture seule après expiration.
+1. [`202610030001_kaisse_pro_v1.sql`](../supabase/migrations/202610030001_kaisse_pro_v1.sql) — tables, relations, Auth, RLS et fonctions initiales d'ouverture/clôture.
+2. [`202610030002_essai_14_jours.sql`](../supabase/migrations/202610030002_essai_14_jours.sql) — essai de 14 jours et lecture seule après expiration.
+3. [`202610030003_stock_unites.sql`](../supabase/migrations/202610030003_stock_unites.sql) — stock téléphonique distinct du float, règlements espèces/wallet et clôture du comptage.
 
-Dans Supabase : **SQL Editor → New query → coller le contenu du fichier → Run**. Exécuter la migration 001 avant la 002, une seule fois chacune. La 002 est écrite de façon réexécutable (`ADD COLUMN IF NOT EXISTS`, politiques remplacées de manière ciblée), mais conservez malgré tout une copie du script appliqué.
+Dans Supabase : **SQL Editor → New query → coller le contenu du fichier → Run**. Sur un projet neuf, exécuter **001 → 002 → 003**, une fois chacune. Si 001 et 002 sont déjà installées, exécuter **seulement 003**. La migration 003 ajoute table/colonnes/fonctions sans mettre à jour les lignes historiques. Conservez une copie des scripts appliqués.
 
 ## Important si des personnes sont déjà inscrites
 
 - **Ne supprimez pas** les tables `agences`, `profils`, `points`, transactions ou utilisateurs Auth.
-- La migration 002 n'utilise ni `TRUNCATE`, ni `DELETE`, ni `DROP TABLE`, ni `UPDATE` global. Elle ajoute cinq colonnes nullable à `agences` (`essai_debute_le`, `essai_termine_le`, `statut_abonnement`, `plan_abonnement`, `abonnement_termine_le`), ajoute des règles de sécurité et remplace les fonctions de création de compte/session.
+- Les migrations 002 et 003 n'utilisent ni `TRUNCATE`, ni `DELETE`, ni `DROP TABLE`, ni mise à jour globale des données métier. La 002 ajoute les colonnes d'abonnement nullable et des contrôles de sécurité. La 003 ajoute une table de stock par session/opérateur, deux colonnes de règlement aux transactions et des fonctions dédiées; les lignes de stock n'apparaissent que lorsqu'une session est ouverte/clôturée ou qu'un mouvement est saisi après installation.
 - Les agences présentes avant l'essai gardent les nouvelles colonnes à `NULL`. L'application les traite comme anciennes agences actives : leurs utilisateurs et données ne sont pas rétroactivement modifiés.
 - Seule la création d'une **nouvelle agence** démarre automatiquement un essai de 14 jours. Un gérant rejoignant une agence hérite de son statut; il ne redémarre pas le compteur. Le forfait Starter bloque les inscriptions de gérants/agents au-delà de trois accès actifs; Pro n'impose pas de plafond dans cette V1.
 - À expiration, les nouvelles agences passent en lecture seule, mais les données ne sont pas supprimées. L'export et la clôture d'une session déjà ouverte restent accessibles. Aucun prélèvement automatique n'est activé.
@@ -29,7 +30,15 @@ where table_schema = 'public'
 order by table_name, ordinal_position;
 ```
 
-La migration 002 suppose que les tables, fonctions et politiques de la migration 001 sont déjà présentes. Si le résultat montre l'ancien schéma de l'application ou si la migration 001 n'a jamais été appliquée, **arrêtez-vous avant de lancer la 002** : il faut d'abord adapter une migration de conversion à cette structure. Cette précaution évite de casser l'inscription existante ou de rendre les données inaccessibles.
+Les migrations 002 et 003 supposent respectivement que 001, puis 001+002, ont déjà été installées. Si la base utilise l'ancien schéma de l'application ou si 001 n'a jamais été appliquée, **arrêtez-vous avant de lancer 002 ou 003** : il faut d'abord adapter une migration de conversion à cette structure. Cette précaution évite de casser l'inscription existante ou de rendre les données inaccessibles.
+
+## Installer le suivi du stock d'unités
+
+La migration 003 définit le stock en **valeur faciale FCFA par opérateur**, séparé du float. Pour un projet qui a déjà reçu les migrations 001 et 002, copiez uniquement `supabase/migrations/202610030003_stock_unites.sql` dans une nouvelle requête SQL Editor et exécutez-la. Elle ne recrée pas les tables de base et ne retouche pas les sessions/transactions précédentes.
+
+Convention V1 pour éviter toute ambiguïté de caisse : l'approvisionnement et le transfert client portent un seul montant, égal à la valeur faciale des unités **et** au règlement saisi. Un approvisionnement payé en espèces diminue les espèces; payé depuis un wallet, il diminue le float choisi. Un transfert au client augmente les espèces ou le wallet choisi et diminue le stock du fournisseur d'unités. Les bonus, remises ou prix de vente différents de la valeur faciale ne sont pas ventilés dans cette version.
+
+Chaque propriétaire/agent ouvre, saisit et clôture sa propre session; le compte propriétaire ne peut pas saisir un mouvement ou un comptage au nom d'un autre agent. Pour une session encore ouverte au moment de l'installation, clôturez-la depuis son propre compte puis ouvrez une nouvelle session avec le stock initial. Le comptage de clôture d'une ancienne session est conservé, mais l'écart d'unités reste non calculable faute de stock d'ouverture historique. Les sessions clôturées antérieures restent inchangées et sont affichées comme non suivies (sans backfill).
 
 ## Vérifier les essais après installation
 

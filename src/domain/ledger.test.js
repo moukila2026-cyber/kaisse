@@ -53,6 +53,43 @@ test("mesure un écart déclaré moins solde théorique à la clôture", () => {
   assert.equal(result.floatMap.orange.theorique, 450_000);
 });
 
+test("rapproche le stock d'unités, les approvisionnements et les transferts clients", () => {
+  const result = calculateSession({ ...session, statut: "cloturee" }, floats, [
+    { session_id: "shift-1", type_operation: "approvisionnement_unites", operateur_code: "orange", montant: 20_000, mode_paiement_unites: "especes", commission_estimee: 0, commission_reelle: 0 },
+    { session_id: "shift-1", type_operation: "transfert_unites", operateur_code: "orange", montant: 10_000, mode_paiement_unites: "especes", commission_estimee: 0, commission_reelle: 0 },
+    { session_id: "shift-1", type_operation: "transfert_unites", operateur_code: "orange", montant: 5_000, mode_paiement_unites: "wallet", operateur_paiement_code: "mtn", commission_estimee: 0, commission_reelle: 0 },
+  ], [], [
+    { session_id: "shift-1", operateur_code: "orange", unites_ouverture: 50_000, unites_cloture_declare: 60_000 },
+    { session_id: "shift-1", operateur_code: "mtn", unites_ouverture: 0, unites_cloture_declare: 0 },
+    { session_id: "shift-1", operateur_code: "wave", unites_ouverture: 0, unites_cloture_declare: 0 },
+  ], [{ code: "orange" }, { code: "mtn" }, { code: "wave" }]);
+
+  assert.equal(result.cashExpected, 190_000);
+  assert.equal(result.floatMap.mtn.theorique, 305_000);
+  assert.equal(result.unitMap.orange.theorique, 55_000);
+  assert.equal(result.unitVariance, 5_000);
+  assert.equal(result.unitHasDifference, true);
+  assert.equal(result.commissionToVerify, 0);
+});
+
+test("détecte les écarts de stock par opérateur même si le total net s'annule", () => {
+  const result = calculateSession({ ...session, statut: "cloturee" }, floats, [], [], [
+    { session_id: "shift-1", operateur_code: "orange", unites_ouverture: 100_000, unites_cloture_declare: 110_000 },
+    { session_id: "shift-1", operateur_code: "mtn", unites_ouverture: 100_000, unites_cloture_declare: 90_000 },
+  ], [{ code: "orange" }, { code: "mtn" }]);
+
+  assert.equal(result.unitVariance, 0);
+  assert.equal(result.unitHasDifference, true);
+});
+
+test("signale les sessions historiques sans stock d'ouverture comme non suivies", () => {
+  const result = calculateSession({ ...session, statut: "cloturee" }, floats, [], [], [], [{ code: "orange" }]);
+
+  assert.equal(result.unitTracked, false);
+  assert.equal(result.unitExpected, 0);
+  assert.equal(result.unitVariance, null);
+});
+
 test("calcule les périodes quotidiennes, hebdomadaires et mensuelles sans décalage de fuseau", () => {
   assert.deepEqual(getReportDateRange("2026-10-03", "day"), {
     startDate: "2026-10-03", endDate: "2026-10-03", days: 1,
@@ -70,8 +107,9 @@ test("filtre le rapport par type, opérateur source/destination et agent", () =>
     { id: "a", type_operation: "transfert", operateur_code: "orange", operateur_destination_code: "wave", agent_id: "agent-1" },
     { id: "b", type_operation: "depot", operateur_code: "wave", operateur_destination_code: null, agent_id: "agent-2" },
     { id: "c", type_operation: "retrait", operateur_code: "mtn", operateur_destination_code: null, agent_id: "agent-1" },
+    { id: "d", type_operation: "transfert_unites", operateur_code: "orange", operateur_paiement_code: "wave", agent_id: "agent-2" },
   ];
-  assert.deepEqual(filterReportTransactions(transactions, { operator: "wave" }).map((row) => row.id), ["a", "b"]);
+  assert.deepEqual(filterReportTransactions(transactions, { operator: "wave" }).map((row) => row.id), ["a", "b", "d"]);
   assert.deepEqual(filterReportTransactions(transactions, { type: "transfert", agent: "agent-1" }).map((row) => row.id), ["a"]);
 });
 

@@ -17,26 +17,28 @@ Le produit **n'est pas** une application grand public et **n'est pas** un portef
 1. **Espace d'agence** : inscription du propriétaire, création d'une agence, ville, premier point et code d'invitation à 8 caractères sans `0/O/1/I/L`.
 2. **Profils et rôles** : propriétaire, gérant, agent. Le propriétaire crée l'espace; le gérant invité rejoint avec son propre compte au moyen d'un code d'invitation de 8 caractères sans `0/O/1/I/L`. Le mot de passe de création accepte 6 caractères minimum; il ne reçoit pas celui du propriétaire.
 3. **Points de vente** : création d'un point avec nom, ville et seuil de float configuré.
-4. **Ouverture de session** : point, agent connecté, espèces réellement comptées et solde de départ Orange Money, MTN MoMo, Moov Money et Wave.
+4. **Ouverture de session** : point, utilisateur connecté, espèces et float réellement comptés, plus stock initial d'unités par opérateur. Le propriétaire, le gérant ou l'agent saisit uniquement dans sa propre session.
 5. **Transactions manuelles** :
    - dépôt : espèces `+ montant`; float de l'opérateur `− montant`;
    - retrait : espèces `− montant`; float de l'opérateur `+ montant`;
-   - transfert entre opérateurs : float source `− montant`, float destinataire `+ montant`, espèces inchangées;
-   - achat de crédit/unités : espèces `+ montant`; float de l'opérateur `− montant`.
-   Chaque ligne comporte montant entier en FCFA, heure, agent, point, opérateur, référence courte facultative et commissions estimée/réelle.
-6. **Commissions** : barème local par opérateur, type et tranche; formule `commission fixe + (montant × points de base / 10 000)`. L'agent peut aussi saisir manuellement le montant réellement constaté. Les deux valeurs sont conservées séparément. Aucun taux opérateur n'est présenté comme officiel.
+   - transfert de float entre opérateurs : float source `− montant`, float destinataire `+ montant`, espèces inchangées;
+   - achat de crédit via float : espèces `+ montant`; float de l'opérateur `− montant`;
+   - approvisionnement du stock téléphonique : stock de l'opérateur `+ valeur faciale`; espèces ou wallet de paiement `− même montant`;
+   - transfert d'unités au client : stock du fournisseur `− valeur faciale`; espèces ou wallet encaissé `+ même montant`.
+   Chaque ligne comporte montant entier en FCFA, heure, utilisateur, point, opérateur, référence courte facultative et, lorsque pertinent, commissions estimée/réelle. Le stock d'unités est une valeur faciale FCFA, pas un nombre de cartes/SIM ni un inventaire multi-référence.
+6. **Commissions** : barème local par opérateur, type et tranche; formule `commission fixe + (montant × points de base / 10 000)`. L'utilisateur peut aussi saisir manuellement le montant réellement constaté pour les opérations commissionnables. L'approvisionnement du stock n'est pas commissionné par défaut. Aucun taux opérateur n'est présenté comme officiel.
 7. **Dépenses** : catégorie, montant et moyen de paiement (espèces ou portefeuille opérateur). Le moyen choisi détermine quel solde théorique est diminué.
-8. **Clôture** : l'agent déclare les espèces comptées et les quatre soldes lus sur les comptes/appareils opérateur. La comparaison est faite par solde, puis additionnée pour un total de float.
+8. **Clôture** : chaque utilisateur déclare les espèces, les quatre soldes de float et le stock d'unités réellement comptés sur sa session. Les écarts sont calculés par opérateur; le stock d'unités est rapproché séparément du float.
 9. **Tableau de bord journalier** : volume d'opérations, nombre de lignes, commissions déclarées/estimées, dépenses, résultat indicatif, état de la session, volumes par opérateur et écarts des clôtures.
 10. **Rapport** : partage manuel du rapport texte, export CSV ou PDF imprimable; filtres période (jour/7/30 jours), type, opérateur et agent. Aucun envoi planifié WhatsApp en V1.
 11. **Journal d'audit minimal** : pas de suppression physique d'une transaction. Un propriétaire/gérant peut annuler une ligne avec un motif; la ligne reste visible, mais ne contribue plus aux soldes.
-12. **Alertes déterministes** : écart déclaré/théorique non nul, commission réelle manquante, float sous le seuil configuré. Pas d'intelligence artificielle ni de détection de fraude.
+12. **Alertes déterministes** : écart déclaré/théorique non nul, commission réelle manquante, float sous le seuil configuré et stock historique non suivi. Pas d'intelligence artificielle ni de détection de fraude.
 
 ### Hors périmètre V1 (à ne pas vendre comme disponible)
 
 - Connexion ou API opérateur, lecture automatique des soldes, initiation de dépôts/retraits/transferts.
 - Garantie du montant ou du délai de paiement des commissions.
-- Comptabilité générale, fiscalité, inventaire, commandes WhatsApp, paie, crédit client.
+- Comptabilité générale, fiscalité, inventaire multi-référence/quantités unitaires, commandes WhatsApp, paie, crédit client. Le stock V1 ne suit que la valeur faciale FCFA par opérateur.
 - Envoi automatique d'un rapport à 20 h, bot WhatsApp ou API WhatsApp Business.
 - Détection automatique de fraude, profilage d'un agent ou accusation à partir d'un écart.
 - Mode hors ligne avec synchronisation multi-téléphones. La démo fonctionne en local; l'espace Supabase connecté nécessite une connexion Internet. Une file d'attente hors ligne doit être une V1.1 testée avant toute promesse dans une zone réseau instable.
@@ -51,20 +53,20 @@ Un écart négatif signifie que le montant déclaré est inférieur au calcul; u
 
 ### Espèces théoriques d'une session
 
-`espèces ouverture + dépôts + achats de crédit − retraits − dépenses payées en espèces`
+`espèces ouverture + dépôts + achats de crédit + transferts d'unités payés en espèces − retraits − approvisionnements d'unités payés en espèces − dépenses payées en espèces`
 
 ### Float théorique par opérateur
 
-`float ouverture + retraits + transferts entrants − dépôts − achats de crédit − transferts sortants − dépenses wallet de cet opérateur`
+`float ouverture + retraits + transferts entrants + règlements clients d'unités reçus sur ce wallet − dépôts − achats de crédit − transferts sortants − approvisionnements payés depuis ce wallet − dépenses wallet de cet opérateur`
 
-Un transfert ne modifie pas les espèces. Les commissions ne sont **pas** automatiquement ajoutées à la caisse ou au float : leur règlement peut intervenir séparément. Elles sont suivies à part. Le « résultat estimé » du tableau de bord signifie simplement `commissions réellement saisies − dépenses saisies`; il ne remplace pas une comptabilité certifiée.
+Le stock théorique d'un opérateur est `stock initial + approvisionnements − transferts clients`; il est distinct du float et le contrôle d'insertion bloque un transfert client supérieur au stock disponible. Par convention, l'approvisionnement/transfert utilise un montant unique : valeur faciale FCFA et règlement espèces/wallet sont supposés égaux. Les bonus, remises ou prix différents ne sont pas ventilés dans cette version. Un transfert de float ne modifie pas les espèces. Les commissions ne sont **pas** automatiquement ajoutées à la caisse ou au float : leur règlement peut intervenir séparément. Elles sont suivies à part. Le « résultat estimé » du tableau de bord signifie simplement `commissions réellement saisies − dépenses saisies`; il ne remplace pas une comptabilité certifiée.
 
 ### Contrôle de saisie et clôture
 
-- Une opération n'est possible que dans une session ouverte du compte agent.
-- Tous les montants sont des entiers positifs en FCFA; l'ouverture et la clôture acceptent zéro.
+- Toute opération et tout comptage de stock s'effectuent dans la session ouverte de l'utilisateur connecté; le propriétaire ne saisit pas au nom d'un agent.
+- Tous les montants sont des entiers FCFA; les mouvements sont positifs et l'ouverture/clôture accepte zéro. Les stocks sont saisis en valeur faciale FCFA.
 - Le transfert exige deux opérateurs différents.
-- La clôture enregistre les valeurs réellement déclarées; elle ne les remplace pas par les valeurs théoriques.
+- La clôture enregistre les valeurs réellement déclarées; elle ne les remplace pas par les valeurs théoriques. Une session historique sans stock initial ne reçoit pas un faux écart : son comptage de clôture est marqué non suivi.
 - Une transaction annulée est exclue des calculs et reste dans le journal avec motif.
 
 ## 4. Écrans et parcours
@@ -74,25 +76,25 @@ Un transfert ne modifie pas les espèces. Les commissions ne sont **pas** automa
 | Accueil | Proposition de valeur, périmètre manuel explicite, opérateurs, démo | Essayer la démo / se connecter |
 | Connexion & inscription | Connexion, création d'agence, ou rejoindre une agence par code | Ouvrir un compte Supabase |
 | Vue d'ensemble | Date/point/session, KPIs du jour, opérations par opérateur, soldes théoriques, dernières lignes, clôtures en écart | Nouvelle opération / ouvrir caisse / rapport |
-| Opérations | Journal filtrable par période, type, opérateur et agent; commissions estimées/réelles; annulation motivée pour manager; export CSV ou PDF imprimable | Dépôt, retrait, transfert, crédit, dépense |
-| Caisse & clôture | Sélecteur de session, ouverture, soldes théoriques, montants déclarés, dépenses, explication de l'écart | Ouvrir, saisir dépense, clôturer |
+| Opérations | Journal filtrable par période, type, opérateur et agent; règlement des mouvements d'unités; commissions estimées/réelles; annulation motivée pour manager; export CSV ou PDF imprimable | Dépôt, retrait, transfert float, approvisionnement/transfert d'unités, dépense |
+| Caisse & clôture | Sélecteur de session, soldes théoriques espèces/float, stock d'unités par opérateur, comptages réels et écarts distincts | Ouvrir, saisir dépense, clôturer sa session |
 | Équipe & points | Membres visibles selon le rôle, statut de session, points de vente, code d'invitation | Copier code / ajouter un point |
 | Réglages | Profil/agence, règles de commissions, source du barème, avertissement sur les estimations | Ajouter une tranche de barème |
-| Modale « Nouvelle opération » | Session, type, opérateur source/destination, montant, commission réelle facultative, référence | Enregistrer dans le journal |
-| Modale « Ouverture » | Point, espèces, quatre soldes électroniques | Démarrer la session |
-| Modale « Clôture » | Théoriques en lecture seule, champs séparés pour cinq montants réels | Enregistrer la clôture |
+| Modale « Nouvelle opération » | Session personnelle, type, opérateur float ou stock, règlement espèces/wallet pour les unités, montant, commission si pertinente, référence | Enregistrer dans sa session |
+| Modale « Ouverture » | Point, espèces, quatre soldes électroniques et stock initial d'unités par opérateur (valeur faciale FCFA) | Démarrer sa session |
+| Modale « Clôture » | Théoriques en lecture seule, espèces, quatre floats et stocks réels par opérateur | Clôturer sa session |
 
 ### Parcours nominal (agent)
 
 1. Le gérant rejoint l'agence avec son compte et le code d'invitation; le propriétaire conserve un compte séparé.
-2. Sélectionne son point et déclare les cinq soldes au début de la journée.
-3. Saisit chaque opération juste après l'avoir effectuée et les dépenses correspondantes.
-4. À la fermeture, consulte les soldes réels dans les applications/terminaux opérateur, compte les espèces et clôture.
+2. Sélectionne son point et déclare espèces, quatre floats et stock téléphonique initial à l'ouverture de sa session.
+3. Saisit chaque opération dans sa propre session : l'approvisionnement augmente le stock et débite espèces/float; un transfert au client baisse le stock et crédite espèces/float.
+4. À la fermeture, consulte les soldes réels, compte espèces et unités par opérateur, puis clôture sa session.
 5. Le gérant examine les écarts, vérifie le journal et peut partager le rapport.
 
 ## 5. Base Supabase livrée
 
-Migration : `supabase/migrations/202610030001_kaisse_pro_v1.sql`.
+Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002_essai_14_jours.sql`, puis `202610030003_stock_unites.sql` (stock téléphonique).
 
 | Table | Rôle / champs métier importants |
 |---|---|
@@ -102,7 +104,8 @@ Migration : `supabase/migrations/202610030001_kaisse_pro_v1.sql`.
 | `points` | Agence, nom, ville, seuil float, actif |
 | `sessions_caisse` | Agent, point, date, état, espèces d'ouverture et montant déclaré de clôture |
 | `soldes_session_operateur` | Un solde d'ouverture et un solde déclaré de clôture par opérateur/session |
-| `transactions` | Type, source/destination, principal FCFA, commissions estimée/réelle, référence, horodatage, motif d'annulation |
+| `soldes_session_unites` | Valeur faciale FCFA du stock d'unités à l'ouverture et au comptage de clôture; indicateur des sessions historiques sans stock initial suivi (migration 003) |
+| `transactions` | Type, source/destination, montant FCFA, règlement du mouvement d'unités (espèces/wallet), commissions, référence, horodatage, motif d'annulation |
 | `depenses` | Catégorie, montant, espèces/wallet, opérateur si nécessaire, agent/session |
 | `commission_baremes` | Agence, opérateur, opération, tranche, fixe, points de base, source, actif |
 
@@ -110,12 +113,12 @@ Migration : `supabase/migrations/202610030001_kaisse_pro_v1.sql`.
 
 - RLS est activé sur les tables métier. Les données restent dans l'agence du profil authentifié.
 - Le client ne peut pas écrire les champs d'abonnement ni modifier un rôle/un rattachement d'agence; l'opérateur active le paiement dans SQL après confirmation. Les modifications métier autorisées aux gérants restent soumises à l'échéance.
-- Un agent ne lit que ses sessions/opérations; propriétaire et gérant voient l'agence.
+- Un agent ne lit que ses sessions/opérations; propriétaire et gérant voient l'agence. Les opérations et comptages restent liés à la session de l'utilisateur connecté; le propriétaire ne peut pas saisir un mouvement au nom d'un agent. La clôture de stock est également réservée au propriétaire/agent de sa propre session.
 - L'inscription déclenche la création du profil et, le cas échéant, de l'agence et du premier point.
 - La migration 002 donne 14 jours aux **nouvelles agences**. Les agences antérieures gardent les colonnes d'abonnement à `NULL`, restent pleinement actives et ne sont ni mises à jour ni converties en essai.
 - Les périodes Starter/Pro peuvent être activées manuellement pour 30 jours. À l'expiration de l'essai ou de la période payée, l'espace reste consultable et exportable en lecture seule; les données ne sont pas supprimées. La clôture d'une session déjà ouverte reste autorisée.
 - Le paiement SasPay et son webhook ne sont pas intégrés dans ce dépôt; il faut confirmer manuellement le règlement avant de renseigner le plan et son échéance.
-- Les ouvertures/clôtures sont des fonctions SQL atomiques et vérifient l'agence, le point, le rôle et les montants.
+- Les ouvertures/clôtures sont des fonctions SQL atomiques et vérifient l'agence, le point, les montants et la session personnelle. La migration 003 bloque côté base les transferts clients au-delà du stock disponible et empêche l'annulation d'un approvisionnement qui rendrait ce stock négatif.
 - Les opérations n'ont pas de suppression physique; l'annulation est motivée et contrôlée.
 - Le navigateur utilise uniquement l'URL Supabase et la clé publique anon/publishable. **Ne jamais exposer `service_role` dans Vite, Git ou `.env` envoyé au navigateur.**
 - Aucun code de barème n'est seedé dans la migration. Faire confirmer chaque tranche localement et conserver sa source/date.
@@ -124,14 +127,14 @@ Migration : `supabase/migrations/202610030001_kaisse_pro_v1.sql`.
 ### Mise en service
 
 1. Créer le projet Supabase.
-2. Dans **SQL Editor**, exécuter `202610030001_kaisse_pro_v1.sql`, puis `202610030002_essai_14_jours.sql` (ou utiliser la Supabase CLI).
+2. Dans **SQL Editor**, exécuter `202610030001_kaisse_pro_v1.sql`, puis `202610030002_essai_14_jours.sql`, puis `202610030003_stock_unites.sql` (ou utiliser la Supabase CLI). Si 001 et 002 sont déjà présentes, exécuter uniquement 003.
 3. Copier `.env.example` vers `.env.local` et mettre `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`.
 4. Configurer les URL Auth, démarrer avec `npm run dev`, créer une agence test; vérifier que la date de fin est exactement 14 jours après l'inscription. Créer ensuite un agent test avec le code d'invitation.
 5. Vérifier RLS avec deux comptes/agences différents avant d'y saisir des montants client.
 
 Pour un projet Supabase **déjà peuplé**, ne réexécutez pas aveuglément la migration de base. Sauvegardez d'abord et vérifiez le schéma; la migration d'essai suppose que le schéma Kaisse Pro v1 est déjà présent. Elle est additive et ne lance aucun `UPDATE` global. Voir [`SUPABASE_SQL_EDITOR.md`](SUPABASE_SQL_EDITOR.md).
 
-Sans `.env.local`, l'application ouvre une démo modifiable locale, balisée comme fictive. Rien de la démo n'est envoyé à Supabase.
+Sans `.env.local`, l'application ouvre une démo modifiable locale, balisée comme fictive. Rien de la démo n'est envoyé à Supabase. La migration 003 ne backfill aucun stock historique : les sessions clôturées antérieures sont marquées non suivies; les sessions ouvertes déjà en cours doivent être clôturées puis remplacées par une nouvelle session avec stock initial avant d'utiliser le suivi des unités.
 
 ## 6. Modèle économique et tarifs de référence
 
