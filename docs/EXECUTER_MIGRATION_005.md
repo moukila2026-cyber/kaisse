@@ -56,6 +56,17 @@ Table Editor → table `transactions` → **Export → CSV** (idem pour `agences
 
 ---
 
+### Version express : une seule requête à me renvoyer
+
+Si vous ne voulez pas naviguer entre plusieurs fichiers, exécutez
+[`supabase/verifications/005_etat_compact.sql`](../supabase/verifications/005_etat_compact.sql)
+(requête 1) et collez-moi le JSON obtenu. Il contient le verdict
+(`Prêt pour la migration 005`, `Migration 004 manquante : …`,
+`005 déjà appliquée`), l'état des 5 migrations, la présence des colonnes et des
+fonctions, et une estimation des volumes. Cette requête n'interroge que le
+catalogue PostgreSQL : elle ne lit aucune de vos lignes et fonctionne même sur
+une base vide.
+
 ## 2. Relever les compteurs AVANT
 
 Ouvrez **SQL Editor → New query**, collez le contenu de
