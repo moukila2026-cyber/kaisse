@@ -256,15 +256,63 @@ gérant et agent.
 
 ---
 
-## 10. Et si vous préférez que je le fasse ?
+## 10. Laisser Arena exécuter la migration (connecteur Supabase)
 
-Arena peut exécuter la migration à votre place si vous connectez le connecteur
-**Supabase** à cette conversation (Réglages → Applications). Une fois connecté,
-je peux :
+Arena peut agir directement sur votre projet — lancer les contrôles, exécuter la
+migration, relire les résultats — à condition que le connecteur **Supabase** soit
+activé pour la conversation. L'autorisation passe par **votre** compte : je ne
+peux ni la donner, ni la contourner, ni voir votre base sans elle.
 
-1. lancer les contrôles du fichier `005_avant.sql` sur votre projet ;
-2. exécuter la 005 ;
-3. relancer les contrôles `005_apres.sql` et vous montrer les résultats.
+### Étapes côté utilisateur (2 minutes, une seule fois)
 
-Sans cette connexion, je ne vois ni votre base ni vos données — c'est ce qui
-explique que ce guide vous laisse la main sur chaque étape.
+1. Dans Arena, ouvrir les **Réglages** de la conversation, section
+   **Applications** (ou « Connecteurs »).
+2. Chercher **Supabase** et cliquer sur **Connecter**.
+3. Autoriser l'accès : Supabase ouvre sa page de consentement, vous choisissez
+   l'organisation puis **le projet** concerné.
+   - Si l'écran propose un choix de portée, préférez **lecture + écriture** :
+     la migration crée des tables, un accès en lecture seule ne suffirait pas.
+   - En cas de doute, commencez par un **projet de préproduction** : la même
+     migration y est rejouable à volonté.
+4. Revenir dans la conversation : le connecteur apparaît comme **connecté**.
+
+### Ce que je fais ensuite, dans cet ordre
+
+| Étape | Action | Effet |
+|---|---|---|
+| 1 | Je liste les projets visibles et vous confirme le nom, la région, la version PostgreSQL | lecture seule |
+| 2 | J'exécute `005_avant.sql` et je vous montre le tableau `OK / MANQUANT` | lecture seule |
+| 3 | Si tout est `OK`, j'exécute la migration 005 **en une transaction** | écriture |
+| 4 | J'exécute `005_apres.sql` et je compare les compteurs avant / après | lecture seule |
+| 5 | Je lance `notify pgrst, 'reload schema'` | rafraîchit l'API |
+| 6 | Je vous rends un compte rendu : ce qui est vert, ce qui reste à faire côté application | — |
+
+Je m'arrête à l'étape 2 si une migration antérieure manque : dans ce cas je vous
+dis laquelle exécuter d'abord, je ne « rattrape » rien au hasard.
+
+### Ce que je ne ferai pas, même connecté
+
+- Je ne touche à aucune **donnée** métier : pas de `UPDATE`, pas de `DELETE`,
+  pas de remplissage rétroactif. La 005 n'en a pas besoin.
+- Je ne lis pas et ne stocke pas vos **clés** : le connecteur gère le jeton,
+  je n'ai jamais besoin de la clé `service_role` ni du mot de passe de la base.
+- Je n'exécute pas d'autres migrations sans vous le demander.
+
+### Si le connecteur Supabase n'apparaît pas
+
+Certaines conversations n'exposent pas ce connecteur. Trois solutions de repli,
+par ordre de simplicité :
+
+1. **SQL Editor** — la procédure des sections 2 à 6 ci-dessus, 5 minutes.
+2. **Script fourni** — si vous avez la chaîne de connexion PostgreSQL du projet :
+   ```bash
+   export DATABASE_URL='postgresql://postgres.<ref>:<mot-de-passe>@aws-0-<region>.pooler.supabase.com:5432/postgres'
+   ./scripts/appliquer-migration-005.sh --verifier-seulement   # contrôles seuls
+   ./scripts/appliquer-migration-005.sh                        # migration + contrôles
+   ```
+   Le script demande une confirmation écrite (« oui »), s'arrête au premier
+   échec et ne conserve ni n'affiche la chaîne de connexion.
+3. **CLI Supabase** — voir la section 9 (`supabase db push`).
+
+Dans les trois cas, envoyez-moi la sortie : je lis les erreurs et je vous dis
+exactement quoi corriger.
