@@ -20,18 +20,26 @@ import {
   ExternalLink,
   FileText,
   HandCoins,
+  History,
   LayoutDashboard,
   LockKeyhole,
   LogOut,
   Mail,
   MapPin,
   MessageCircle,
+  Package,
+  PackageSearch,
   Plus,
+  QrCode,
   ReceiptText,
+  Send,
   Settings,
   Share2,
   ShieldCheck,
   Smartphone,
+  Landmark,
+  PiggyBank,
+  CalendarClock,
   Store,
   TrendingDown,
   TrendingUp,
@@ -41,7 +49,9 @@ import {
 } from "lucide-react";
 import {
   calculateCommission,
+  buildLastCountByPoint,
   calculateSession,
+  CASH_MOVEMENT_SOURCES,
   COMMISSION_OPERATION_TYPES,
   csvCell,
   EXPENSE_CATEGORIES,
@@ -51,9 +61,31 @@ import {
   formatTime,
   getReportDateRange,
   OPERATION_TYPES,
+  OPERATION_TYPES_SAISIE,
+  settlementAmount,
   todayInAbidjan,
 } from "./domain/ledger.js";
+import { buildAlerts } from "./domain/alerts.js";
+import {
+  buildAgentPerformance,
+  buildCommissionReconciliation,
+  buildCreditBook,
+  buildEncaissementSummary,
+  buildPointConsolidation,
+} from "./domain/consolidation.js";
+import { buildFloatForecastFor, buildUnitForecastFor, dateRange } from "./domain/forecast.js";
 import { getSubscriptionState } from "./domain/subscription.js";
+import {
+  canSellUnits,
+  computeUnitStock,
+  isUnitOperation,
+  maskBeneficiary,
+  summarizeUnitMovements,
+  UNIT_LEVELS,
+  UNIT_OPERATION_TYPES,
+  unitOperationLabel,
+  unitSettlement,
+} from "./domain/units.js";
 import {
   createDemoWorkspace,
   DEFAULT_OPERATORS,
@@ -64,59 +96,67 @@ import {
   writeDemoWorkspace,
 } from "./data/demo.js";
 import { isSupabaseConfigured, supabase } from "./supabaseClient.js";
+import { watchConnectivity } from "./pwa.js";
 import {
+  addCashMovement,
   addCommissionRule,
+  addCommissionStatement,
+  addCreditMovement,
+  addEncaissement,
   addExpense,
   addPoint,
   addTransaction,
+  addUnitTariff,
   cancelTransaction,
   closeCashSession,
   loadWorkspace,
   openCashSession,
+  updatePointThresholds,
 } from "./services/workspace.js";
+import PilotagePage, { AlertsCenter, AuditList } from "./pages/PilotagePage.jsx";
+import ClientsPage from "./pages/ClientsPage.jsx";
+import {
+  CashMovementModal,
+  CreditModal,
+  EncaissementModal,
+  ReceiptModal,
+  StatementModal,
+  TariffModal,
+} from "./pages/OperationsModals.jsx";
+import {
+  BalanceLine,
+  FormField,
+  KpiCard,
+  LogoMark,
+  ModalActions,
+  ModalError,
+  ModalShell,
+  PageHeading,
+  SettingRow,
+  VarianceBox,
+} from "./ui/atoms.jsx";
+import {
+  escapeHtml,
+  getInitials,
+  isManager,
+  makeErrorMessage,
+  safeAmount,
+} from "./ui/helpers.js";
 import "./styles.css";
 
 const NAV_ITEMS = [
-  { id: "apercu", label: "Vue d'ensemble", icon: LayoutDashboard },
-  { id: "operations", label: "Opérations", icon: ArrowLeftRight },
-  { id: "caisse", label: "Caisse & clôture", icon: Wallet },
-  { id: "equipe", label: "Équipe & points", icon: Users },
-  { id: "reglages", label: "Réglages", icon: Settings },
+  { id: "apercu", label: "Vue d'ensemble", short: "Accueil", icon: LayoutDashboard },
+  { id: "operations", label: "Opérations", short: "Opér.", icon: ArrowLeftRight },
+  { id: "unites", label: "Unités & transferts", short: "Unités", icon: Package },
+  { id: "caisse", label: "Caisse & clôture", short: "Caisse", icon: Wallet },
+  { id: "pilotage", label: "Pilotage & prévisions", short: "Pilote", icon: Activity },
+  { id: "clients", label: "Clients & crédit", short: "Clients", icon: HandCoins },
+  { id: "equipe", label: "Équipe & points", short: "Équipe", icon: Users },
+  { id: "reglages", label: "Réglages", short: "Régl.", icon: Settings },
 ];
 
 const OPERATION_LABELS = Object.fromEntries(OPERATION_TYPES.map((item) => [item.code, item.label]));
 const DEMO_WARNING = "Démonstration — montants et commissions fictifs, enregistrés uniquement sur cet appareil.";
-
-function getInitials(profile) {
-  return `${profile?.prenom?.[0] || "K"}${profile?.nom?.[0] || ""}`.toUpperCase();
-}
-
-function isManager(user) {
-  return user?.role === "proprietaire" || user?.role === "gerant";
-}
-
-function makeErrorMessage(error) {
-  const message = error?.message || "Une erreur inattendue est survenue.";
-  if (/Invalid login credentials/i.test(message)) return "Email ou mot de passe incorrect.";
-  if (/Email not confirmed/i.test(message)) return "Confirmez votre adresse email avant de vous connecter.";
-  if (/already registered/i.test(message)) return "Cette adresse email possède déjà un compte. Connectez-vous.";
-  if (/duplicate key/i.test(message)) return "Un point portant ce nom existe déjà dans cette agence.";
-  return message;
-}
-
-function safeAmount(value, label, allowZero = false) {
-  const amount = Number(value);
-  if (!Number.isSafeInteger(amount) || amount < 0 || (!allowZero && amount === 0)) {
-    throw new Error(`${label} doit être un montant entier en FCFA${allowZero ? " (zéro ou plus)" : " supérieur à zéro"}.`);
-  }
-  return amount;
-}
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>\"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
-  })[character]);
-}
 
 function App() {
   const [screen, setScreen] = useState("landing");
@@ -132,6 +172,10 @@ function App() {
   const [pointFilter, setPointFilter] = useState("tous");
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [modal, setModal] = useState("");
+  const [unitTargetOperator, setUnitTargetOperator] = useState("");
+  const [modalData, setModalData] = useState(null);
+  const [alertDrawer, setAlertDrawer] = useState(false);
+  const [online, setOnline] = useState(true);
   const [notice, setNotice] = useState(null);
   const [authMessage, setAuthMessage] = useState("");
   const [authError, setAuthError] = useState("");
@@ -142,6 +186,8 @@ function App() {
     const timer = window.setInterval(() => setClock(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => watchConnectivity(setOnline), []);
 
   useEffect(() => {
     let stillHere = true;
@@ -226,8 +272,27 @@ function App() {
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [workspace, sessionIds]);
   const sessionSummaries = useMemo(() => daySessions.map((session) => ({
     session,
-    totals: calculateSession(session, workspace?.session_floats || [], dayTransactions, dayExpenses, workspace?.session_units || [], workspace?.operators || DEFAULT_OPERATORS),
+    totals: calculateSession(
+      session,
+      workspace?.session_floats || [],
+      dayTransactions,
+      dayExpenses,
+      workspace?.session_units || [],
+      workspace?.operators || DEFAULT_OPERATORS,
+      workspace?.cash_movements || [],
+    ),
   })), [daySessions, workspace, dayTransactions, dayExpenses]);
+  const lastCountByPoint = useMemo(() => buildLastCountByPoint({
+    points: workspace?.points || [],
+    sessions: workspace?.sessions || [],
+    sessionFloats: workspace?.session_floats || [],
+    sessionUnits: workspace?.session_units || [],
+    transactions: workspace?.transactions || [],
+    expenses: workspace?.expenses || [],
+    cashMovements: workspace?.cash_movements || [],
+    operators: workspace?.operators || DEFAULT_OPERATORS,
+  }), [workspace]);
+
   const selectableSessions = sessionSummaries;
   const selectedSession = sessionSummaries.find(({ session }) => session.id === selectedSessionId)?.session || null;
   const selectedSummary = sessionSummaries.find(({ session }) => session.id === selectedSession?.id)?.totals || null;
@@ -260,6 +325,117 @@ function App() {
   const agentById = useMemo(() => new Map((workspace?.profiles || []).map((profile) => [profile.id, profile])), [workspace]);
   const pointById = useMemo(() => new Map((workspace?.points || []).map((point) => [point.id, point])), [workspace]);
   const operatorByCode = useMemo(() => new Map((workspace?.operators || []).map((operator) => [operator.code, operator])), [workspace]);
+
+  // --- Suivi des unités téléphoniques (section « Unités & transferts ») ---
+  const unitThresholdByOperator = useMemo(() => {
+    const visiblePoints = (workspace?.points || []).filter((point) => pointFilter === "tous" || point.id === pointFilter);
+    const thresholds = visiblePoints
+      .map((point) => (point.seuil_alerte_unites == null ? null : Number(point.seuil_alerte_unites)))
+      .filter((value) => value != null && Number.isFinite(value) && value > 0);
+    const threshold = thresholds.length ? Math.max(...thresholds) : null;
+    const operators = workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS;
+    return Object.fromEntries(operators.map((operator) => [operator.code, threshold]));
+  }, [workspace, pointFilter]);
+
+  const unitStockOverview = useMemo(() => computeUnitStock({
+    operators: workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS,
+    sessions: daySessions,
+    sessionUnits: workspace?.session_units || [],
+    transactions: dayTransactions,
+    thresholds: unitThresholdByOperator,
+  }), [workspace, daySessions, dayTransactions, unitThresholdByOperator]);
+
+  const unitJournal = useMemo(() => reportTransactions.filter(isUnitOperation), [reportTransactions]);
+  const unitPeriodSummary = useMemo(() => summarizeUnitMovements(unitJournal), [unitJournal]);
+
+  const forecastDays = Math.min(14, Math.max(3, reportRange.days));
+  const unitForecasts = useMemo(() => buildUnitForecastFor({
+    operators: workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS,
+    transactions: reportTransactions,
+    stock: unitStockOverview.byCode,
+    endDate: selectedDate,
+    days: forecastDays,
+  }), [workspace, reportTransactions, unitStockOverview, selectedDate, forecastDays]);
+
+  const floatStockByOperator = useMemo(() => {
+    const totals = {};
+    for (const { session, totals: sessionTotals } of sessionSummaries) {
+      if (session.statut !== "ouverte") continue;
+      for (const [code, row] of Object.entries(sessionTotals.floatMap || {})) {
+        totals[code] = (totals[code] || 0) + Number(row.theorique || 0);
+      }
+    }
+    return Object.fromEntries(Object.entries(totals).map(([code, theorique]) => [code, { theorique }]));
+  }, [sessionSummaries]);
+
+  const floatForecasts = useMemo(() => buildFloatForecastFor({
+    operators: workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS,
+    transactions: reportTransactions,
+    expenses: workspace?.expenses || [],
+    floats: floatStockByOperator,
+    endDate: selectedDate,
+    days: forecastDays,
+  }), [workspace, reportTransactions, floatStockByOperator, selectedDate, forecastDays]);
+
+  const consolidation = useMemo(() => buildPointConsolidation({
+    points: (workspace?.points || []).filter((point) => pointFilter === "tous" || point.id === pointFilter),
+    sessions: reportSessions,
+    transactions: reportTransactions,
+    expenses: workspace?.expenses || [],
+    sessionFloats: workspace?.session_floats || [],
+    sessionUnits: workspace?.session_units || [],
+    cashMovements: workspace?.cash_movements || [],
+    operators: workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS,
+    thresholds: unitThresholdByOperator,
+  }), [workspace, reportSessions, reportTransactions, pointFilter, unitThresholdByOperator]);
+
+  const performances = useMemo(() => buildAgentPerformance({
+    profiles: workspace?.profiles || [],
+    sessions: reportSessions,
+    transactions: reportTransactions,
+  }), [workspace, reportSessions, reportTransactions]);
+
+  const reconciliation = useMemo(() => buildCommissionReconciliation({
+    transactions: reportTransactions,
+    statements: workspace?.commission_statements || [],
+    operators: workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS,
+  }), [workspace, reportTransactions]);
+
+  const creditBook = useMemo(() => buildCreditBook({
+    movements: workspace?.credit_movements || [],
+    points: workspace?.points || [],
+    today: selectedDate,
+  }), [workspace, selectedDate]);
+
+  const encaissementSummary = useMemo(
+    () => buildEncaissementSummary(workspace?.encaissements || []),
+    [workspace],
+  );
+
+  const creditSummary = {
+    ...creditBook,
+    encaissementsTotal: encaissementSummary.total,
+    encaissementsCount: encaissementSummary.count,
+    encaissementsCommission: encaissementSummary.commission,
+  };
+
+  const alertList = useMemo(() => buildAlerts({
+    unitStock: unitStockOverview,
+    floatMap: Object.fromEntries(Object.entries(floatStockByOperator).map(([code, row]) => [code, row])),
+    point: pointFilter === "tous"
+      ? (workspace?.points?.[0] || null)
+      : (workspace?.points || []).find((point) => point.id === pointFilter) || null,
+    subscription,
+    forecasts: [...unitForecasts, ...floatForecasts].map((row) => ({
+      ...row,
+      nom: row.nom,
+    })),
+    sessions: workspace?.sessions || [],
+    today: todayInAbidjan(),
+    credit: creditBook,
+    now: Date.now(),
+  }), [unitStockOverview, floatStockByOperator, workspace, subscription, unitForecasts, floatForecasts, creditBook, pointFilter]);
+
 
   function updateDemo(updater) {
     setWorkspace((previous) => {
@@ -366,16 +542,25 @@ function App() {
   async function saveTransaction(payload) {
     const session = ownOpenSessions.find((item) => item.id === payload.session_id);
     if (!session) throw new Error("Ouvrez d'abord une session de caisse avec votre compte agent.");
-    if (payload.type_operation === "approvisionnement_unites" || payload.type_operation === "transfert_unites") {
+    if (payload.type_operation === "approvisionnement_unites" || payload.type_operation === "transfert_unites" || payload.type_operation === "ajustement_unites") {
       const totals = sessionSummaries.find(({ session: item }) => item.id === payload.session_id)?.totals;
       if (!totals?.unitTracked) throw new Error("Le stock initial n'est pas suivi sur cette ancienne session. Clôturez-la, puis ouvrez une nouvelle session avec le stock de départ.");
+      const available = totals.unitMap[payload.operateur_code]?.theorique || 0;
       if (payload.type_operation === "transfert_unites") {
-        const available = totals.unitMap[payload.operateur_code]?.theorique || 0;
-        if (Number(payload.montant) > available) throw new Error(`Stock insuffisant pour cet opérateur : disponible ${formatMoney(available)}.`);
+        const check = canSellUnits({ available, amount: payload.montant });
+        if (!check.ok) throw new Error(check.message);
+      }
+      if (payload.type_operation === "ajustement_unites" && payload.ajustement_sens === "sortie") {
+        const check = canSellUnits({ available, amount: payload.montant });
+        if (!check.ok) throw new Error(check.message.replace("Stock insuffisant", "Stock insuffisant pour cet ajustement"));
       }
     }
+    // Le bénéficiaire masqué n'est envoyé que s'il existe : un projet Supabase qui
+    // n'a pas encore reçu la migration 004 continue de fonctionner.
+    const { beneficiaire_masque: beneficiary, ...rest } = payload;
     const row = {
-      ...payload,
+      ...rest,
+      ...(beneficiary ? { beneficiaire_masque: maskBeneficiary(beneficiary) } : {}),
       agence_id: workspace.agency.id,
       point_id: session.point_id,
       agent_id: workspace.user.id,
@@ -476,14 +661,31 @@ function App() {
   }
 
   async function savePoint(payload) {
+    const pointPayload = { ...payload, agence_id: workspace.agency.id };
+    if (pointPayload.seuil_alerte_unites == null) delete pointPayload.seuil_alerte_unites;
     if (workspace.demo) {
-      const point = { ...payload, id: makeDemoId("point"), agence_id: workspace.agency.id, actif: true, created_at: new Date().toISOString() };
+      const point = { ...pointPayload, id: makeDemoId("point"), actif: true, created_at: new Date().toISOString() };
       updateDemo((previous) => ({ ...previous, points: [...previous.points, point] }));
     } else {
-      await addPoint({ ...payload, agence_id: workspace.agency.id });
+      await addPoint(pointPayload);
       await refreshAfterSave();
     }
     setNotice({ type: "success", text: "Point ajouté à l'agence." });
+  }
+
+  async function saveThresholds(pointId, values) {
+    ensureCanWrite();
+    if (!isManager(workspace?.user)) throw new Error("Seuls le propriétaire et les gérants peuvent modifier les seuils.");
+    if (workspace.demo) {
+      updateDemo((previous) => ({
+        ...previous,
+        points: previous.points.map((point) => (point.id === pointId ? { ...point, ...values } : point)),
+      }));
+    } else {
+      await updatePointThresholds(pointId, values);
+      await refreshAfterSave();
+    }
+    setNotice({ type: "success", text: "Seuils d'alerte mis à jour." });
   }
 
   async function saveRule(payload) {
@@ -522,6 +724,172 @@ function App() {
     } catch (error) {
       setNotice({ type: "error", text: makeErrorMessage(error) });
     }
+  }
+
+  function pushAudit(action, detail, entite = "application", entiteId = null) {
+    const entry = {
+      id: makeDemoId("audit"), agence_id: workspace?.agency?.id || null, acteur_id: workspace?.user?.id || null,
+      action, entite, entite_id: entiteId, detail, created_at: new Date().toISOString(),
+    };
+    if (workspace?.demo) {
+      updateDemo((previous) => ({ ...previous, audit_log: [entry, ...(previous.audit_log || [])] }));
+    }
+    return entry;
+  }
+
+  async function saveCashMovement(payload) {
+    const session = ownOpenSessions.find((item) => item.id === payload.session_id);
+    if (!session) throw new Error("Ouvrez d'abord une session de caisse avec votre compte agent.");
+    const row = {
+      ...payload,
+      agence_id: workspace.agency.id,
+      point_id: session.point_id,
+      agent_id: workspace.user.id,
+    };
+    if (workspace.demo) {
+      const movement = { ...row, id: makeDemoId("caisse"), created_at: new Date().toISOString() };
+      updateDemo((previous) => ({ ...previous, cash_movements: [movement, ...(previous.cash_movements || [])] }));
+      pushAudit("caisse.mouvement", `${payload.sens === "entree" ? "Entrée" : "Sortie"} ${payload.montant} F — ${payload.motif}`);
+    } else {
+      await addCashMovement(row);
+      await refreshAfterSave();
+    }
+    setNotice({ type: "success", text: "Mouvement de caisse enregistré." });
+  }
+
+  async function saveCreditMovement(payload) {
+    const row = { ...payload, agence_id: workspace.agency.id, agent_id: workspace.user.id };
+    if (workspace.demo) {
+      const movement = { ...row, id: makeDemoId("credit"), created_at: new Date().toISOString() };
+      updateDemo((previous) => ({ ...previous, credit_movements: [movement, ...(previous.credit_movements || [])] }));
+      pushAudit(`credit.${payload.sens}`, `${payload.client_nom} — ${payload.montant} F`);
+    } else {
+      await addCreditMovement(row);
+      await refreshAfterSave();
+    }
+    setNotice({ type: "success", text: payload.sens === "remboursement" ? "Remboursement enregistré." : "Crédit client enregistré." });
+  }
+
+  async function saveStatement(payload) {
+    const row = { ...payload, agence_id: workspace.agency.id };
+    if (workspace.demo) {
+      const statement = { ...row, id: makeDemoId("releve"), created_at: new Date().toISOString() };
+      updateDemo((previous) => ({ ...previous, commission_statements: [statement, ...(previous.commission_statements || [])] }));
+      pushAudit("commissions.releve", `${payload.operateur_code} — ${payload.montant_recu} F reçus`);
+    } else {
+      await addCommissionStatement(row);
+      await refreshAfterSave();
+    }
+    setNotice({ type: "success", text: "Relevé de commissions enregistré." });
+  }
+
+  async function saveTariff(payload) {
+    const row = { ...payload, agence_id: workspace.agency.id, actif: true };
+    if (workspace.demo) {
+      const tariff = { ...row, id: makeDemoId("tarif"), created_at: new Date().toISOString() };
+      updateDemo((previous) => ({ ...previous, unit_tariffs: [tariff, ...(previous.unit_tariffs || [])] }));
+      pushAudit("tarif.creation", `${payload.operateur_code} — vente ${payload.prix_vente} / ${payload.prix_valeur_faciale}`);
+    } else {
+      await addUnitTariff(row);
+      await refreshAfterSave();
+    }
+    setNotice({ type: "success", text: "Barème de vente d'unités enregistré." });
+  }
+
+  async function saveEncaissement(payload) {
+    const row = { ...payload, agence_id: workspace.agency.id, agent_id: workspace.user.id };
+    if (workspace.demo) {
+      const payment = { ...row, id: makeDemoId("encaissement"), created_at: new Date().toISOString() };
+      updateDemo((previous) => ({ ...previous, encaissements: [payment, ...(previous.encaissements || [])] }));
+      pushAudit("encaissement.marchand", `${payload.montant} F — ${payload.operateur_code}`);
+    } else {
+      await addEncaissement(row);
+      await refreshAfterSave();
+    }
+    setNotice({ type: "success", text: "Encaissement marchand enregistré." });
+  }
+
+  function buildDailyRecap() {
+    const openTotals = sessionSummaries.filter(({ session }) => session.statut === "ouverte");
+    const cash = openTotals.reduce((sum, { totals }) => sum + Number(totals.cashExpected || 0), 0);
+    const floatTotal = openTotals.reduce((sum, { totals }) => sum + Number(totals.floatExpected || 0), 0);
+    const units = openTotals.reduce((sum, { totals }) => sum + (totals.unitTracked ? Number(totals.unitExpected || 0) : 0), 0);
+    const alerts = alertList.slice(0, 4).map((alert) => `• ${alert.title}`);
+    return [
+      `KAISSE — RÉCAP DU ${formatDate(selectedDate)}`,
+      `${workspace.agency.nom}`,
+      `Opérations : ${dayTransactions.filter((transaction) => !transaction.annullee_le).length} · volume ${formatMoney(volumeTotal)}`,
+      `Commissions déclarées : ${formatMoney(commissionDeclaredTotal)}`,
+      `Marge unités : ${formatMoney(unitStockOverview.totalMargin)}`,
+      `Dépenses : ${formatMoney(expensesTotal)} · résultat estimé ${formatMoney(resultEstimate + unitStockOverview.totalMargin)}`,
+      `Caisse espèces : ${formatMoney(cash)}`,
+      `Float électronique : ${formatMoney(floatTotal)}`,
+      `Stock d'unités : ${formatMoney(units)}`,
+      alerts.length ? "Points d'attention :" : "Aucune alerte.",
+      ...alerts,
+      "Montants saisis manuellement — vérifiez les relevés opérateur.",
+    ].join("\n");
+  }
+
+  function prepareMessage(content, destinataire = "Propriétaire", canal = "whatsapp") {
+    const message = {
+      id: makeDemoId("message"), agence_id: workspace?.agency?.id, canal, destinataire, contenu: content,
+      statut: "prepare", created_at: new Date().toISOString(),
+    };
+    if (workspace?.demo) {
+      updateDemo((previous) => ({ ...previous, messages: [message, ...(previous.messages || [])] }));
+    }
+    return message;
+  }
+
+  async function sendExternal(text) {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "Kaisse", text });
+      } else {
+        window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
+      }
+    } catch (error) {
+      if (error?.name !== "AbortError") setNotice({ type: "error", text: "Partage impossible : copiez le message affiché." });
+    }
+  }
+
+  function shareRecap() {
+    const text = buildDailyRecap();
+    prepareMessage(text, "Propriétaire");
+    setModalData({ text, destinataire: "Propriétaire" });
+    setModal("receipt");
+  }
+
+  function shareCreditReminder(rows = []) {
+    const text = [
+      `Rappel crédit — ${workspace.agency.nom}`,
+      ...rows.map((row) => `• ${row.nom} : ${formatMoney(row.overdue || row.balance)} échéance ${row.dueDate ? formatDate(row.dueDate) : "non précisée"}`),
+      "Merci de régulariser au comptoir. Ce message est préparé par Kaisse, aucun envoi automatique.",
+    ].join("\n");
+    setModalData({ text, destinataire: "Clients concernés" });
+    setModal("receipt");
+  }
+
+  function openReceiptFor(transaction) {
+    const operator = operatorByCode.get(transaction.operateur_code)?.nom || transaction.operateur_code;
+    const text = [
+      `${workspace.agency.nom} — REÇU`,
+      `${formatDate(selectedDate)} ${formatTime(transaction.created_at)}`,
+      `${unitOperationLabel(transaction.type_operation)} · ${operator}`,
+      `Valeur : ${formatMoney(transaction.montant)}`,
+      `Réglé : ${formatMoney(settlementAmount(transaction))} (${transaction.mode_paiement_unites === "wallet" ? "mobile money" : "espèces"})`,
+      `Référence : ${transaction.reference || "—"}`,
+      "Merci de votre confiance.",
+    ].join("\n");
+    prepareMessage(text, transaction.beneficiaire_masque || "Client");
+    setModalData({ text, destinataire: transaction.beneficiaire_masque || "Client" });
+    setModal("receipt");
+  }
+
+  function openUnitModal(variant, operatorCode = "") {
+    setUnitTargetOperator(operatorCode);
+    setModal(variant);
   }
 
   function resetDemo() {
@@ -572,7 +940,7 @@ function App() {
   function exportCsv(transactions = reportTransactions) {
     const sessionById = new Map((workspace?.report_sessions || workspace?.sessions || []).map((session) => [session.id, session]));
     const rows = [
-      ["Date", "Heure", "Point", "Agent", "Type", "Opérateur", "Destination", "Montant FCFA", "Règlement unités", "Commission estimée FCFA", "Commission réelle FCFA", "Référence", "Statut"],
+      ["Date", "Heure", "Point", "Agent", "Type", "Opérateur", "Destination", "Montant FCFA", "Montant réglé FCFA", "Marge unités FCFA", "Règlement unités", "Bénéficiaire masqué", "Commission estimée FCFA", "Commission réelle FCFA", "Référence", "Statut"],
       ...transactions.map((transaction) => [
         sessionById.get(transaction.session_id)?.date_caisse || selectedDate,
         formatTime(transaction.created_at),
@@ -582,9 +950,16 @@ function App() {
         operatorByCode.get(transaction.operateur_code)?.nom || transaction.operateur_code,
         operatorByCode.get(transaction.operateur_destination_code)?.nom || "",
         transaction.montant,
+        settlementAmount(transaction),
+        transaction.type_operation === "transfert_unites"
+          ? settlementAmount(transaction) - Number(transaction.montant || 0)
+          : transaction.type_operation === "approvisionnement_unites"
+            ? Number(transaction.montant || 0) - settlementAmount(transaction)
+            : "",
         transaction.type_operation === "approvisionnement_unites" || transaction.type_operation === "transfert_unites"
           ? (transaction.mode_paiement_unites === "wallet" ? `Float ${operatorByCode.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code || ""}` : "Espèces")
-          : "",
+          : transaction.type_operation === "ajustement_unites" ? `Stock ${transaction.ajustement_sens === "entree" ? "entrée" : "sortie"}` : "",
+        transaction.beneficiaire_masque || "",
         transaction.commission_estimee,
         transaction.commission_reelle ?? "",
         transaction.reference || "",
@@ -596,6 +971,43 @@ function App() {
     const link = document.createElement("a");
     link.href = url;
     link.download = `kaisse-pro-${reportRange.startDate}-${reportRange.endDate}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportUnitsCsv(rows = unitJournal) {
+    const sessionById = new Map((workspace?.report_sessions || workspace?.sessions || []).map((session) => [session.id, session]));
+    const header = ["Date", "Heure", "Mouvement", "Opérateur", "Valeur faciale FCFA", "Montant réglé FCFA", "Marge FCFA", "Sens ajustement", "Règlement", "Bénéficiaire masqué", "Commission FCFA", "Agent", "Point", "Référence", "Statut"];
+    const lines = rows.map((transaction) => {
+      const session = sessionById.get(transaction.session_id);
+      const isWallet = transaction.mode_paiement_unites === "wallet";
+      return [
+        session?.date_caisse || selectedDate,
+        formatTime(transaction.created_at),
+        unitOperationLabel(transaction.type_operation),
+        operatorByCode.get(transaction.operateur_code)?.nom || transaction.operateur_code,
+        transaction.montant,
+        unitSettlement(transaction),
+        transaction.type_operation === "transfert_unites"
+          ? unitSettlement(transaction) - Number(transaction.montant || 0)
+          : transaction.type_operation === "approvisionnement_unites" ? Number(transaction.montant || 0) - unitSettlement(transaction) : 0,
+        transaction.ajustement_sens || "",
+        isWallet ? `Float ${operatorByCode.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code || ""}`.trim() : transaction.type_operation === "ajustement_unites" ? "Stock seul" : "Espèces",
+        transaction.beneficiaire_masque || "",
+        transaction.type_operation === "approvisionnement_unites" ? 0 : (transaction.commission_reelle ?? transaction.commission_estimee ?? ""),
+        `${agentById.get(transaction.agent_id)?.prenom || ""} ${agentById.get(transaction.agent_id)?.nom || ""}`.trim(),
+        pointById.get(transaction.point_id)?.nom || "",
+        transaction.reference || "",
+        transaction.annulee_le ? `Annulée — ${transaction.motif_annulation || ""}` : "Validée",
+      ];
+    });
+    const csv = `\uFEFF${[header, ...lines].map((row) => row.map(csvCell).join(";")).join("\r\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `kaisse-unites-${reportRange.startDate}-${reportRange.endDate}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -622,9 +1034,13 @@ function App() {
       const commissionEstimated = transaction.type_operation !== "approvisionnement_unites" && transaction.commission_reelle == null;
       const settlement = transaction.type_operation === "approvisionnement_unites" || transaction.type_operation === "transfert_unites"
         ? (transaction.mode_paiement_unites === "wallet" ? `Float ${operatorByCode.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code || ""}` : "Espèces")
-        : "—";
+        : transaction.type_operation === "ajustement_unites" ? `Stock ${transaction.ajustement_sens === "entree" ? "entrée" : "sortie"}` : "—";
+      const regulated = settlementAmount(transaction);
+      const unitMargin = transaction.type_operation === "transfert_unites"
+        ? regulated - Number(transaction.montant || 0)
+        : transaction.type_operation === "approvisionnement_unites" ? Number(transaction.montant || 0) - regulated : 0;
       const commissionLabel = transaction.type_operation === "approvisionnement_unites" ? "—" : formatMoney(commission);
-      return `<tr class="${canceled ? "cancelled" : ""}"><td>${escapeHtml(formatDate(session?.date_caisse || selectedDate))}</td><td>${escapeHtml(formatTime(transaction.created_at))}</td><td>${escapeHtml(OPERATION_LABELS[transaction.type_operation] || transaction.type_operation)}${destination ? ` → ${escapeHtml(destination.nom)}` : ""}</td><td>${escapeHtml(operator?.nom || transaction.operateur_code)}</td><td class="num">${escapeHtml(formatMoney(transaction.montant))}</td><td>${escapeHtml(settlement)}</td><td class="num">${escapeHtml(commissionLabel)}${commissionEstimated ? " <small>(estimée)</small>" : ""}</td><td>${escapeHtml(`${agent?.prenom || ""} ${agent?.nom || ""}`.trim() || "Agent")}</td><td>${escapeHtml(transaction.reference || "—")}</td><td>${canceled ? `Annulée — ${escapeHtml(transaction.motif_annulation || "")}` : "Validée"}</td></tr>`;
+      return `<tr class="${canceled ? "cancelled" : ""}"><td>${escapeHtml(formatDate(session?.date_caisse || selectedDate))}</td><td>${escapeHtml(formatTime(transaction.created_at))}</td><td>${escapeHtml(OPERATION_LABELS[transaction.type_operation] || transaction.type_operation)}${destination ? ` → ${escapeHtml(destination.nom)}` : ""}</td><td>${escapeHtml(operator?.nom || transaction.operateur_code)}</td><td class="num">${escapeHtml(formatMoney(transaction.montant))}</td><td class="num">${escapeHtml(formatMoney(regulated))}</td><td class="num">${escapeHtml(formatMoney(unitMargin))}</td><td>${escapeHtml(settlement)}</td><td class="num">${escapeHtml(commissionLabel)}${commissionEstimated ? " <small>(estimée)</small>" : ""}</td><td>${escapeHtml(`${agent?.prenom || ""} ${agent?.nom || ""}`.trim() || "Agent")}</td><td>${escapeHtml(transaction.reference || "—")}</td><td>${canceled ? `Annulée — ${escapeHtml(transaction.motif_annulation || "")}` : "Validée"}</td></tr>`;
     }).join("");
     const periodLabel = reportRange.startDate === reportRange.endDate
       ? formatDate(reportRange.endDate)
@@ -632,7 +1048,7 @@ function App() {
     const selectedPoint = pointFilter === "tous" ? "Tous les points" : pointById.get(pointFilter)?.nom || "Point";
     const printDocument = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Rapport Kaisse — ${escapeHtml(periodLabel)}</title><style>
       *{box-sizing:border-box}body{font:12px Arial,sans-serif;color:#182f38;margin:28px}h1{font-size:22px;margin:0 0 4px}p{color:#637379;margin:4px 0 18px}.summary{display:flex;gap:20px;padding:12px 14px;background:#f3f6f2;border-radius:8px;margin-bottom:18px}.summary strong{display:block;font-size:15px;margin-top:4px}table{border-collapse:collapse;width:100%;font-size:9px}th{text-align:left;background:#17333d;color:#fff;padding:8px 6px}td{padding:7px 6px;border-bottom:1px solid #e7eae6;vertical-align:top}.num{text-align:right;white-space:nowrap}.cancelled{color:#8d594c;background:#fff8f4}small{color:#8c7a53}footer{margin-top:18px;padding-top:9px;border-top:1px solid #ddd;color:#6e7d81;font-size:9px}@page{size:landscape;margin:12mm}@media print{body{margin:0}button{display:none}}
-      </style></head><body><h1>Kaisse — rapport des opérations</h1><p>${escapeHtml(agency.nom)} · ${escapeHtml(periodLabel)} · ${escapeHtml(selectedPoint)} · filtres période/type/opérateur/agent appliqués</p><div class="summary"><div>Opérations validées<strong>${valid.length}</strong></div><div>Volume validé<strong>${escapeHtml(formatMoney(totalVolume))}</strong></div><div>Commissions déclarées/estimées<strong>${escapeHtml(formatMoney(totalCommissions))}</strong></div><div>Lignes exportées<strong>${transactions.length}</strong></div></div><table><thead><tr><th>Date</th><th>Heure</th><th>Type</th><th>Opérateur</th><th>Montant</th><th>Règlement unités</th><th>Commission</th><th>Agent</th><th>Référence</th><th>Statut</th></tr></thead><tbody>${bodyRows || `<tr><td colspan="10">Aucune opération pour cette sélection.</td></tr>`}</tbody></table><footer>Rapport généré par Kaisse. Les montants proviennent des saisies manuelles de l'agence et ne sont pas vérifiés par une API opérateur.</footer></body></html>`;
+      </style></head><body><h1>Kaisse — rapport des opérations</h1><p>${escapeHtml(agency.nom)} · ${escapeHtml(periodLabel)} · ${escapeHtml(selectedPoint)} · filtres période/type/opérateur/agent appliqués</p><div class="summary"><div>Opérations validées<strong>${valid.length}</strong></div><div>Volume validé<strong>${escapeHtml(formatMoney(totalVolume))}</strong></div><div>Commissions déclarées/estimées<strong>${escapeHtml(formatMoney(totalCommissions))}</strong></div><div>Lignes exportées<strong>${transactions.length}</strong></div></div><table><thead><tr><th>Date</th><th>Heure</th><th>Type</th><th>Opérateur</th><th>Valeur</th><th>Réglé</th><th>Marge unités</th><th>Règlement</th><th>Commission</th><th>Agent</th><th>Référence</th><th>Statut</th></tr></thead><tbody>${bodyRows || `<tr><td colspan="12">Aucune opération pour cette sélection.</td></tr>`}</tbody></table><footer>Rapport généré par Kaisse. Les montants proviennent des saisies manuelles de l'agence et ne sont pas vérifiés par une API opérateur.</footer></body></html>`;
     printWindow.document.open();
     printWindow.document.write(printDocument);
     printWindow.document.close();
@@ -716,11 +1132,25 @@ function App() {
             {subscription.mode === "active" && <span className="paid-pill"><CheckCircle2 size={13} />{subscription.planCode ? `${subscription.planCode === "starter" ? "Starter" : "Pro"} · ` : ""}{subscription.daysLeft == null ? "Abonnement actif" : `${subscription.daysLeft} j restants`}</span>}
             <label className="date-control"><CalendarDays size={15} /><input aria-label="Date de consultation" type="date" value={selectedDate} max={todayInAbidjan()} onChange={(event) => setSelectedDate(event.target.value)} /></label>
             <label className="point-control"><MapPin size={15} /><select value={pointFilter} onChange={(event) => setPointFilter(event.target.value)}><option value="tous">Tous les points</option>{visiblePoints.map((point) => <option value={point.id} key={point.id}>{point.nom}</option>)}</select></label>
+            <button className={`icon-button alert-bell ${alertList.length ? "has-alerts" : ""}`} title="Centre d'alertes" onClick={() => setAlertDrawer((open) => !open)}>
+              <Bell size={17} />
+              {alertList.length > 0 && <span className="alert-bell-count">{alertList.length}</span>}
+            </button>
             <button className="icon-button top-logout" title="Se déconnecter" onClick={signOut}><LogOut size={17} /></button>
           </div>
         </header>
 
+        {alertDrawer && <div className="alert-drawer">
+          <div className="alert-drawer-head">
+            <div><strong>Centre d'alertes</strong><span>{alertList.length} point(s) d'attention</span></div>
+            <button className="icon-button small" onClick={() => setAlertDrawer(false)} aria-label="Fermer les alertes"><X size={16} /></button>
+          </div>
+          <AlertsCenter alerts={alertList.slice(0, 8)} onGo={(target) => { setAlertDrawer(false); setPage(target); }} compact />
+          <button className="text-button drawer-link" onClick={() => { setAlertDrawer(false); setPage("pilotage"); }}>Tout voir dans Pilotage <ArrowRight size={14} /></button>
+        </div>}
+
         {notice && <div className={`notice ${notice.type}`} role="status"><span>{notice.text}</span><button className="notice-close" onClick={() => setNotice(null)} aria-label="Fermer"><X size={15} /></button></div>}
+        {!online && <div className="offline-banner"><AlertTriangle size={14} /><span>Hors ligne : l'application reste consultable et la démo fonctionne. Les enregistrements Supabase reprendront au retour du réseau.</span></div>}
         {workspace?.demo && <div className="demo-banner"><AlertTriangle size={16} /><span>{DEMO_WARNING}</span><button onClick={resetDemo}>Réinitialiser</button></div>}
         {workspace && subscription.mode === "trial" && <div className="trial-banner"><Clock3 size={16} /><div><strong>Essai gratuit · {subscription.daysLeft} jour{subscription.daysLeft > 1 ? "s" : ""} restant{subscription.daysLeft > 1 ? "s" : ""}</strong><span>Accès complet pendant 14 jours à compter de la création de l'agence. Aucun prélèvement automatique n'est effectué par cette V1.</span></div></div>}
         {workspace && subscription.mode === "expired" && <div className="trial-banner expired"><LockKeyhole size={16} /><div><strong>{subscription.reason === "subscription" ? "Votre période payée est terminée" : "Votre période d'essai est terminée"}</strong><span>Vos données, rapports et exports sont conservés en lecture seule. La clôture d'une session déjà ouverte reste possible; contactez Kaisse pour réactiver votre agence.</span></div></div>}
@@ -759,6 +1189,13 @@ function App() {
             onCancel={voidTransaction}
             onShare={shareDailyReport}
             onOpenOwnSession={() => setModal("open-session")}
+            unitAlerts={unitStockOverview.alerts}
+            alerts={alertList}
+            unitMargin={unitStockOverview.totalMargin}
+            cashMovements={(workspace.cash_movements || []).filter((movement) => sessionIds.has(movement.session_id))}
+            onShareRecap={shareRecap}
+            onOpenReceipt={openReceiptFor}
+            onOpenAlertCenter={() => setAlertDrawer(true)}
           />
         )}
 
@@ -780,6 +1217,36 @@ function App() {
             onExport={exportCsv}
             onExportPdf={exportPdf}
             onCancel={voidTransaction}
+            onReceipt={openReceiptFor}
+            onCashMovement={() => setModal("cash")}
+            onCreateReceipt={() => setModal("receipt")}
+          />
+        )}
+
+        {workspace && page === "unites" && (
+          <UnitsPage
+            date={selectedDate}
+            reportRange={reportRange}
+            period={reportPeriod}
+            onPeriodChange={setReportPeriod}
+            stock={unitStockOverview}
+            journal={unitJournal}
+            summary={unitPeriodSummary}
+            operators={operatorOrder}
+            points={visiblePoints}
+            pointById={pointById}
+            agents={agentById}
+            canManage={canManage}
+            canWrite={subscription.canWrite}
+            onOpenModal={setModal}
+            onOpenUnit={openUnitModal}
+            onCancel={voidTransaction}
+            onExport={() => exportUnitsCsv(unitJournal)}
+            onGo={setPage}
+            forecasts={unitForecasts}
+            tariffs={workspace.unit_tariffs || []}
+            onOpenReceipt={openReceiptFor}
+            onOpenTariff={() => setModal("tarif")}
           />
         )}
 
@@ -801,6 +1268,46 @@ function App() {
             canWrite={subscription.canWrite}
             onOpenModal={setModal}
             onOpenOwnSession={() => setModal("open-session")}
+            cashMovements={(workspace.cash_movements || []).filter((movement) => movement.session_id === selectedSession?.id)}
+          />
+        )}
+
+        {workspace && page === "pilotage" && (
+          <PilotagePage
+            date={selectedDate}
+            reportRange={reportRange}
+            period={reportPeriod}
+            onPeriodChange={setReportPeriod}
+            consolidation={consolidation}
+            unitForecasts={unitForecasts}
+            floatForecasts={floatForecasts}
+            performances={performances}
+            reconciliation={reconciliation}
+            alerts={alertList}
+            operators={operatorOrder}
+            canManage={canManage}
+            canWrite={subscription.canWrite}
+            onGo={setPage}
+            onOpenModal={setModal}
+            onShareRecap={shareRecap}
+          />
+        )}
+
+        {workspace && page === "clients" && (
+          <ClientsPage
+            credit={creditSummary}
+            creditMovements={workspace.credit_movements || []}
+            points={visiblePoints}
+            pointById={pointById}
+            encaissements={workspace.encaissements || []}
+            messages={workspace.messages || []}
+            auditLog={workspace.audit_log || []}
+            agents={agentById}
+            canWrite={subscription.canWrite}
+            onOpenModal={(name, data) => { setModalData(data || null); setModal(name); }}
+            onGo={setPage}
+            onShareReminder={shareCreditReminder}
+            today={selectedDate}
           />
         )}
 
@@ -812,6 +1319,7 @@ function App() {
             points={visiblePoints}
             sessions={daySessions}
             summaries={sessionSummaries}
+            performances={performances}
             canManage={canManage}
             canWrite={subscription.canWrite}
             onOpenModal={setModal}
@@ -837,6 +1345,15 @@ function App() {
             onResetDemo={workspace.demo ? resetDemo : null}
             canManage={canManage}
             canWrite={subscription.canWrite}
+            tariffs={workspace.unit_tariffs || []}
+            auditLog={workspace.audit_log || []}
+            agents={agentById}
+            points={visiblePoints}
+            statements={workspace.commission_statements || []}
+            onShareRecap={shareRecap}
+            onOpenUnit={openUnitModal}
+            messages={workspace.messages || []}
+            onSaveThreshold={(pointId, values) => saveThresholds(pointId, values).catch((error) => setNotice({ type: "error", text: makeErrorMessage(error) }))}
           />
         )}
       </div>
@@ -844,7 +1361,7 @@ function App() {
       <nav className="mobile-nav" aria-label="Navigation mobile">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
-          return <button key={item.id} className={page === item.id ? "active" : ""} onClick={() => setPage(item.id)}><Icon size={19} /><span>{item.label.split(" ")[0]}</span></button>;
+          return <button key={item.id} className={page === item.id ? "active" : ""} onClick={() => setPage(item.id)}><Icon size={17} /><span>{item.short || item.label.split(" ")[0]}</span></button>;
         })}
       </nav>
 
@@ -854,6 +1371,85 @@ function App() {
         points={visiblePoints}
         operators={operatorOrder}
         rules={workspace.commission_baremes || []}
+        onClose={() => setModal("")}
+        onSave={saveTransaction}
+      />}
+      {modal === "unit-appro" && <UnitMovementModal
+        variant="appro"
+        initialOperator={unitTargetOperator}
+        sessions={ownOpenSessions}
+        summaries={sessionSummaries}
+        points={visiblePoints}
+        operators={operatorOrder}
+        rules={workspace.commission_baremes || []}
+        stock={unitStockOverview}
+        tariffs={workspace.unit_tariffs || []}
+        onClose={() => setModal("")}
+        onSave={saveTransaction}
+      />}
+      {modal === "unit-vente" && <UnitMovementModal
+        variant="vente"
+        initialOperator={unitTargetOperator}
+        sessions={ownOpenSessions}
+        summaries={sessionSummaries}
+        points={visiblePoints}
+        operators={operatorOrder}
+        rules={workspace.commission_baremes || []}
+        stock={unitStockOverview}
+        tariffs={workspace.unit_tariffs || []}
+        onClose={() => setModal("")}
+        onSave={saveTransaction}
+      />}
+      {modal === "cash" && <CashMovementModal
+        sessions={ownOpenSessions}
+        points={visiblePoints}
+        onClose={() => setModal("")}
+        onSave={saveCashMovement}
+      />}
+      {modal === "credit" && <CreditModal
+        variant="credit"
+        points={visiblePoints}
+        onClose={() => setModal("")}
+        onSave={saveCreditMovement}
+      />}
+      {modal === "credit-remboursement" && modalData && <CreditModal
+        variant="remboursement"
+        row={modalData}
+        points={visiblePoints}
+        onClose={() => setModal("")}
+        onSave={saveCreditMovement}
+      />}
+      {modal === "statement" && <StatementModal
+        operators={operatorOrder}
+        onClose={() => setModal("")}
+        onSave={saveStatement}
+      />}
+      {modal === "tarif" && <TariffModal
+        operators={operatorOrder}
+        onClose={() => setModal("")}
+        onSave={saveTariff}
+      />}
+      {modal === "encaissement" && <EncaissementModal
+        points={visiblePoints}
+        operators={operatorOrder}
+        onClose={() => setModal("")}
+        onSave={saveEncaissement}
+      />}
+      {modal === "receipt" && modalData && <ReceiptModal
+        receipt={modalData}
+        onClose={() => setModal("")}
+        onSend={(content) => sendExternal(content)}
+      />}
+      {modal === "unit-ajustement" && <UnitMovementModal
+        variant="ajustement"
+        initialOperator={unitTargetOperator}
+        sessions={ownOpenSessions}
+        summaries={sessionSummaries}
+        points={visiblePoints}
+        operators={operatorOrder}
+        rules={workspace.commission_baremes || []}
+        stock={unitStockOverview}
+        tariffs={workspace.unit_tariffs || []}
         onClose={() => setModal("")}
         onSave={saveTransaction}
       />}
@@ -869,6 +1465,7 @@ function App() {
         operators={operatorOrder}
         selectedDate={selectedDate}
         isHistorical={isHistorical}
+        lastCounts={lastCountByPoint}
         onClose={() => setModal("")}
         onSave={saveOpenSession}
       />}
@@ -892,10 +1489,6 @@ function pageLabel(id) {
   return NAV_ITEMS.find((item) => item.id === id)?.label || "Vue d'ensemble";
 }
 
-function LogoMark({ light = false }) {
-  return <div className={`brand-mark ${light ? "light" : ""}`}><Wallet size={20} strokeWidth={2} /></div>;
-}
-
 function LandingPage({ onDemo, onLogin }) {
   const demoRows = [
     { name: "Orange Money", amount: "450 000 F", color: "#ff7900" },
@@ -914,9 +1507,9 @@ function LandingPage({ onDemo, onLogin }) {
         <div className="hero-copy">
           <div className="eyebrow"><span className="eyebrow-dot" /> CONÇU POUR LES POINTS MOBILE MONEY</div>
           <h1>À la fermeture,<br />sachez <em>où est votre argent.</em></h1>
-          <p>Kaisse Pro aide les gérants d'agences à suivre les opérations, les commissions déclarées et les soldes espèces / électroniques — puis à comparer le théorique au montant réellement compté.</p>
+          <p>Kaisse Pro suit les dépôts, retraits et transferts d'unités de votre point : commissions déclarées, float électronique, espèces et stock d'unités par opérateur — puis compare le théorique au montant réellement compté.</p>
           <div className="hero-actions"><button className="button button-dark button-large" onClick={onDemo}>Explorer la démo gratuite <ArrowRight size={17} /></button><button className="button button-outline button-large" onClick={onLogin}>Créer mon espace</button></div>
-          <div className="hero-proof"><span><Check size={15} /> Orange · MTN · Moov · Wave</span><span><Check size={15} /> Pensé mobile d'abord</span><span><Check size={15} /> Pas besoin d'API opérateur</span></div>
+          <div className="hero-proof"><span><Check size={15} /> Orange · MTN · Moov · Wave</span><span><Check size={15} /> Mobile d'abord, installable</span><span><Check size={15} /> Consultable hors ligne</span><span><Check size={15} /> Pas besoin d'API opérateur</span></div>
         </div>
         <div className="preview-card-wrap">
           <div className="preview-card">
@@ -933,12 +1526,50 @@ function LandingPage({ onDemo, onLogin }) {
       <section className="landing-value">
         <div className="section-heading"><span>LE MVP, SANS LE SUPERFLU</span><h2>Le cahier devient un journal vérifiable.</h2><p>Un seul flux pour l'ouverture, les opérations, les dépenses et la clôture. Les soldes restent saisis par l'équipe et comparés à un théorique explicite.</p></div>
         <div className="value-grid">
-          <FeatureCard icon={ArrowLeftRight} number="01" title="Enregistrer l'opération" text="Dépôts, retraits, transferts de float et stock d'unités séparé, avec approvisionnements et ventes client attribués à la session." />
+          <FeatureCard icon={ArrowLeftRight} number="01" title="Enregistrer l'opération" text="Dépôts, retraits, transferts de float et mouvements d'unités, chaque ligne attribuée à une session et à un agent." />
           <FeatureCard icon={HandCoins} number="02" title="Voir les commissions" text="Barèmes configurables par agence ou saisie manuelle. Estimé et montant réel restent séparés." />
-          <FeatureCard icon={ShieldCheck} number="03" title="Rapprocher la caisse" text="Déclarez les espèces et chaque solde électronique à l'ouverture et à la fermeture." />
+          <FeatureCard icon={ShieldCheck} number="03" title="Rapprocher la caisse" text="Déclarez les espèces, chaque solde électronique et le stock d'unités à l'ouverture comme à la fermeture." />
           <FeatureCard icon={Users} number="04" title="Suivre les agents" text="Chaque session et chaque opération sont associées à un profil et à un point." />
           <FeatureCard icon={FileText} number="05" title="Partager le rapport" text="Export CSV ou PDF imprimable avec filtres de période, type, opérateur et gérant." />
           <FeatureCard icon={AlertTriangle} number="06" title="Repérer un écart" text="Le montant déclaré moins le théorique est affiché avec un signe clair et un motif à vérifier." />
+          <FeatureCard icon={Activity} number="07" title="Prévoir la rupture" text="Moyenne des sorties, couverture en jours et quantité à commander par opérateur, unités et float." />
+          <FeatureCard icon={Landmark} number="08" title="Suivre les espèces" text="Dépôts en banque, coffre et renforts de caisse entrent dans le théorique : plus d'argent « disparu »." />
+          <FeatureCard icon={HandCoins} number="09" title="Carnet de crédit client" text="Crédits d'unités ou de float, remboursements, échéances en retard et rappel WhatsApp préparé." />
+          <FeatureCard icon={Building2} number="10" title="Consolider les points" text="Résultat, commissions, marge et alertes de chaque point sur une seule vue propriétaire." />
+          <FeatureCard icon={PiggyBank} number="11" title="Mesurer la marge unités" text="Prix d'achat, prix de vente et valeur faciale séparés : la marge réelle du transfert d'unités." />
+          <FeatureCard icon={ShieldCheck} number="12" title="Rapprocher les commissions" text="Comparez le relevé opérateur, les commissions constatées et l'attendu de vos barèmes." />
+        </div>
+      </section>
+
+      <section className="landing-units">
+        <div className="units-spotlight">
+          <div className="units-spotlight-copy">
+            <span className="eyebrow">MODULE UNITÉS & TRANSFERTS</span>
+            <h2>Le stock d'unités, suivi comme le float.</h2>
+            <p>Un point qui vend des transferts d'unités gère deux trésoreries : l'argent électronique et le crédit téléphonique. Kaisse les sépare, pour que le comptage de fin de journée ne mélange plus les deux.</p>
+            <ul className="units-spotlight-list">
+              <li><Check size={15} /><span><strong>Stock par opérateur</strong> — ouverture, approvisionnements, transferts clients, valeur faciale FCFA.</span></li>
+              <li><Check size={15} /><span><strong>Règlement explicite</strong> — chaque achat ou vente indique s'il touche les espèces ou le float.</span></li>
+              <li><Check size={15} /><span><strong>Seuil d'alerte</strong> — stock bas et rupture signalés avant de refuser un client.</span></li>
+              <li><Check size={15} /><span><strong>Écart de comptage</strong> — comparé au stock réellement compté à la clôture.</span></li>
+            </ul>
+            <button className="button button-dark" onClick={onDemo}>Tester le module en démo <ArrowRight size={16} /></button>
+          </div>
+          <div className="units-spotlight-card">
+            <div className="spotlight-card-head"><span>Stock d'unités · Centre-ville</span><span className="spotlight-pill">Démo</span></div>
+            {[
+              { name: "Orange Money", stock: "68 000 F", badge: "Disponible", tone: "ok", color: "#ff7900" },
+              { name: "MTN MoMo", stock: "50 000 F", badge: "Disponible", tone: "ok", color: "#ffcc08" },
+              { name: "Moov Money", stock: "20 000 F", badge: "Stock bas", tone: "bas", color: "#0072ce" },
+              { name: "Wave", stock: "9 000 F", badge: "Stock bas", tone: "bas", color: "#1dc8e0" },
+            ].map((row) => <div className="spotlight-row" key={row.name}>
+              <span className="operator-dot" style={{ "--operator-color": row.color }} />
+              <span className="spotlight-name">{row.name}</span>
+              <strong>{row.stock}</strong>
+              <span className={`unit-level-badge ${row.tone}`}>{row.badge}</span>
+            </div>)}
+            <div className="spotlight-foot"><span>Approvisionnements du jour</span><strong>+50 000 F</strong><span>Transferts clients</span><strong>−18 000 F</strong></div>
+          </div>
         </div>
       </section>
 
@@ -1025,24 +1656,13 @@ function AuthPage({ configured, error, message, onSubmit, onDemo, onBack }) {
   );
 }
 
-function FormField({ label, hint, children }) {
-  return <label className="form-field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>;
-}
-
-function PageHeading({ eyebrow, title, description, actions }) {
-  return <div className="page-heading"><div><div className="page-eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>;
-}
-
-function KpiCard({ label, value, hint, icon: Icon, tone = "ink" }) {
-  return <article className="kpi-card"><div className={`kpi-icon ${tone}`}><Icon size={19} strokeWidth={1.8} /></div><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div>{hint && <div className="kpi-hint">{hint}</div>}</article>;
-}
-
 function OverviewPage({
   agency, user, selectedDate, pointFilter, selectedSession, selectedSummary, sessionSummaries,
   selectedSessionId, onSessionChange, transactions, sessionDateById, expenses, volume, commissions,
   commissionEstimate, commissionNeedsReview, resultEstimate, closedWithDifference,
   operatorOrder, operatorByCode, pointById, agentById, canManage, canWrite, onGo, onOpenModal,
-  onShare, onOpenOwnSession, onCancel,
+  onShare, onOpenOwnSession, onCancel, unitAlerts = [], alerts = [], unitMargin = 0,
+  cashMovements = [], onShareRecap, onOpenReceipt, onOpenAlertCenter,
 }) {
   const isToday = selectedDate === todayInAbidjan();
   const operatorVolumes = operatorOrder.map((operator) => ({
@@ -1068,7 +1688,11 @@ function OverviewPage({
         eyebrow={`${agency.ville || "Côte d'Ivoire"} · ${formatDate(selectedDate)}`}
         title={`Bonjour ${user.prenom || ""}`.trim()}
         description="Le point du jour, les mouvements et les écarts à vérifier."
-        actions={<><button className="button button-outline" onClick={onShare}><Share2 size={16} />Partager le rapport</button>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}><Plus size={16} />Nouvelle opération</button>}</>}
+        actions={<>
+          <button className="button button-outline" onClick={onShare}><Share2 size={16} />Rapport PDF</button>
+          <button className="button button-outline" onClick={onShareRecap}><Send size={16} />Récap du soir</button>
+          {canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}><Plus size={16} />Nouvelle opération</button>}
+        </>}
       />
 
       <div className="session-strip">
@@ -1080,12 +1704,22 @@ function OverviewPage({
 
       {closedWithDifference.length > 0 && <div className="alert-card"><div className="alert-mark"><AlertTriangle size={18} /></div><div><strong>{closedWithDifference.length} clôture{closedWithDifference.length > 1 ? "s" : ""} à vérifier</strong><span>Un écart négatif correspond à un montant déclaré inférieur au théorique. Vérifiez les opérations et les comptages espèces, float et unités; certaines anciennes sessions peuvent ne pas avoir de stock initial suivi.</span></div><button className="text-button" onClick={() => onGo("caisse")}>Voir la caisse <ArrowRight size={15} /></button></div>}
       {floatBelowThreshold && <div className="alert-card low-float-alert"><div className="alert-mark"><Smartphone size={18} /></div><div><strong>Float sous le seuil configuré pour {selectedPoint.nom}</strong><span>Solde théorique : {formatMoney(selectedSummary.floatExpected)} · seuil saisi par votre agence : {formatMoney(selectedPoint.seuil_alerte_float)}. Vérifiez les soldes directement auprès des opérateurs.</span></div></div>}
+      {unitAlerts.length > 0 && <div className="alert-card low-unit-alert"><div className="alert-mark"><Package size={18} /></div><div><strong>{unitAlerts.length} opérateur{unitAlerts.length > 1 ? "s" : ""} sous le seuil d'unités</strong><span>{unitAlerts.map((alert) => `${alert.nom} : ${formatMoney(alert.theorique)}`).join(" · ")} — seuil saisi {formatMoney(unitAlerts[0].seuil)}. Réapprovisionnez le stock avant la rupture.</span></div><button className="text-button" onClick={() => onGo("unites")}>Gérer les unités <ArrowRight size={15} /></button></div>}
+
+      <section className="panel overview-alerts">
+        <div className="panel-heading">
+          <div><h2>Centre d'alertes</h2><p>{alerts.length ? `${alerts.length} point(s) d'attention — stock, float, sessions, crédit, abonnement` : "Aucun point d'attention : tout est dans les repères"}</p></div>
+          <button className="text-button" onClick={onOpenAlertCenter}><Bell size={15} />Tout voir <ArrowRight size={14} /></button>
+        </div>
+        <AlertsCenter alerts={alerts.slice(0, 3)} onGo={onGo} compact />
+      </section>
 
       <div className="kpi-grid">
         <KpiCard label="Volume d'opérations" value={formatMoney(volume)} hint={`${transactions.filter((item) => !item.annulee_le).length} opérations · float, crédit et mouvements d'unités`} icon={Activity} tone="blue" />
         <KpiCard label="Commissions déclarées" value={formatMoney(commissions)} hint={commissionNeedsReview ? `${commissionNeedsReview} opération${commissionNeedsReview > 1 ? "s" : ""} sans montant réel saisi` : `Estimées : ${formatMoney(commissionEstimate)}`} icon={HandCoins} tone="gold" />
         <KpiCard label="Float électronique théorique" value={selectedSummary ? formatMoney(selectedSummary.floatExpected) : "—"} hint={selectedSession?.statut === "cloturee" ? `Déclaré : ${formatMoney(selectedSummary?.floatDeclared)}` : "Solde d'ouverture + opérations - dépenses wallet"} icon={Smartphone} tone="teal" />
         <KpiCard label="Espèces théoriques" value={selectedSummary ? formatMoney(selectedSummary.cashExpected) : "—"} hint={selectedSummary?.cashVariance == null ? "Le montant réel sera confirmé à la clôture" : `Écart déclaré : ${formatMoney(selectedSummary.cashVariance)}`} icon={Banknote} tone={selectedSummary?.cashVariance && selectedSummary.cashVariance !== 0 ? "red" : "ink"} />
+        <KpiCard label="Marge sur les unités" value={formatMoney(unitMargin)} hint="Différence entre prix de vente et valeur faciale, sur la période affichée" icon={PiggyBank} tone="gold" />
       </div>
 
       <div className="overview-grid">
@@ -1113,19 +1747,27 @@ function OverviewPage({
         </section>
       </div>
 
+      {cashMovements.length > 0 && <section className="panel cash-movements-panel">
+        <div className="panel-heading">
+          <div><h2>Mouvements d'espèces du jour</h2><p>Dépôts en banque, coffre et renforts de caisse</p></div>
+          <button className="text-button" onClick={() => onOpenModal("cash")}><Plus size={15} />Nouveau mouvement</button>
+        </div>
+        <div className="cash-movements-list">{cashMovements.slice(0, 6).map((movement) => <div className="cash-movement-row" key={movement.id}>
+          <span className={`cash-movement-icon ${movement.sens}`}>{movement.sens === "entree" ? <ArrowDownCircle size={15} /> : <ArrowUpCircle size={15} />}</span>
+          <div><strong>{movement.motif || "Mouvement de caisse"}</strong><small>{CASH_MOVEMENT_SOURCES.find((source) => source.code === movement.source)?.label || movement.source} · {formatTime(movement.created_at)}</small></div>
+          <b className={movement.sens === "entree" ? "positive" : "negative"}>{movement.sens === "entree" ? "+" : "−"}{formatMoney(movement.montant)}</b>
+        </div>)}</div>
+      </section>}
+
       <section className="panel recent-panel">
         <div className="panel-heading"><div><h2>Transactions du jour sélectionné</h2><p>{formatDate(selectedDate)} · {dashboardTransactions.length} lignes · {canManage ? "toute l'équipe" : "votre activité"}</p></div><button className="text-button" onClick={() => onGo("operations")}>Journal complet <ArrowRight size={15} /></button></div>
-        {dashboardTransactions.length ? <TransactionTable rows={dashboardTransactions} operators={operatorByCode} points={pointById} agents={agentById} canManage={canManage && canWrite} onCancel={onCancel} compact showDate sessionDateById={sessionDateById} /> : <div className="empty-state compact"><ReceiptText size={22} /><p>Aucune opération enregistrée pour cette date.</p></div>}
+        {dashboardTransactions.length ? <TransactionTable rows={dashboardTransactions} operators={operatorByCode} points={pointById} agents={agentById} canManage={canManage && canWrite} onCancel={onCancel} onReceipt={onOpenReceipt} compact showDate sessionDateById={sessionDateById} /> : <div className="empty-state compact"><ReceiptText size={22} /><p>Aucune opération enregistrée pour cette date.</p></div>}
       </section>
     </main>
   );
 }
 
-function BalanceLine({ icon: Icon, operator, label, amount, declared, variance, closed }) {
-  return <div className="balance-line"><div className="balance-label">{operator ? <span className="operator-dot" style={{ "--operator-color": operator.couleur }} /> : <span className="balance-icon"><Icon size={15} /></span>}<span>{label}</span></div><div className="balance-amounts"><strong>{formatMoney(amount)}</strong>{closed && <span className={variance === 0 ? "variance zero" : "variance"}>Déclaré {formatMoney(declared)} · {variance > 0 ? "+" : ""}{formatMoney(variance)}</span>}</div></div>;
-}
-
-function OperationsPage({ date, reportRange, period, onPeriodChange, transactions, sessionDateById, operators, points, agents, sessionCount, canManage, canWrite, onOpenModal, onExport, onExportPdf, onCancel }) {
+function OperationsPage({ date, reportRange, period, onPeriodChange, transactions, sessionDateById, operators, points, agents, sessionCount, canManage, canWrite, onOpenModal, onExport, onExportPdf, onCancel, onReceipt, onCashMovement, onCreateReceipt }) {
   const [typeFilter, setTypeFilter] = useState("tous");
   const [operatorFilter, setOperatorFilter] = useState("tous");
   const [agentFilter, setAgentFilter] = useState("tous");
@@ -1153,6 +1795,7 @@ function OperationsPage({ date, reportRange, period, onPeriodChange, transaction
         actions={<>
           <button className="button button-outline" onClick={() => onExport(filteredRows)}><Download size={16} />CSV</button>
           <button className="button button-outline" onClick={() => onExportPdf(filteredRows)}><FileText size={16} />PDF</button>
+          {canWrite && <button className="button button-soft" onClick={() => onOpenModal("cash")}><Landmark size={16} />Mouvement de caisse</button>}
           {canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}><Plus size={16} />Nouvelle opération</button>}
         </>}
       />
@@ -1175,7 +1818,7 @@ function OperationsPage({ date, reportRange, period, onPeriodChange, transaction
           {canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Ajouter une dépense</button>}
         </div>
         {filteredRows.length ? (
-          <TransactionTable rows={filteredRows} operators={operators} points={points} agents={agents} canManage={canManage && canWrite} onCancel={onCancel} showDate sessionDateById={sessionDateById} />
+          <TransactionTable rows={filteredRows} operators={operators} points={points} agents={agents} canManage={canManage && canWrite} onCancel={onCancel} onReceipt={onReceipt} showDate sessionDateById={sessionDateById} />
         ) : (
           <div className="empty-state"><ReceiptText size={25} /><strong>Aucune opération ne correspond à ces filtres.</strong><span>Modifiez la période ou les filtres, ou ouvrez une session pour saisir un premier mouvement.</span>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("transaction")}>Ajouter une opération</button>}</div>
         )}
@@ -1184,7 +1827,7 @@ function OperationsPage({ date, reportRange, period, onPeriodChange, transaction
     </main>
   );
 }
-function TransactionTable({ rows, operators, points, agents, canManage, onCancel, compact = false, showDate = false, sessionDateById = new Map() }) {
+function TransactionTable({ rows, operators, points, agents, canManage, onCancel, onReceipt, compact = false, showDate = false, sessionDateById = new Map() }) {
   return <div className="table-scroll"><table className={`data-table ${compact ? "compact-table" : ""}`}><thead><tr>{showDate && <th>Date</th>}<th>Heure</th><th>Opération</th><th>Opérateur</th><th>Montant</th><th>Commission</th><th>Agent · point</th><th>Référence</th>{canManage && <th />}</tr></thead><tbody>{rows.map((transaction) => {
     const operator = operators.get(transaction.operateur_code);
     const destination = transaction.operateur_destination_code ? operators.get(transaction.operateur_destination_code) : null;
@@ -1200,19 +1843,431 @@ function TransactionTable({ rows, operators, points, agents, canManage, onCancel
       <td><div className="commission-cell">{transaction.type_operation === "approvisionnement_unites" ? <strong>—</strong> : commission == null ? <><strong>{formatMoney(transaction.commission_estimee)}</strong><small>estimée · à vérifier</small></> : <><strong>{formatMoney(commission)}</strong><small>déclarée</small></>}</div></td>
       <td><div className="operation-cell"><strong>{agent ? `${agent.prenom} ${agent.nom}`.trim() : "Agent"}</strong><small>{points.get(transaction.point_id)?.nom || "Point"}</small></div></td>
       <td className="reference-cell">{transaction.reference || "—"}</td>
-      {canManage && <td>{!canceled && <button className="row-action" title="Annuler avec un motif" onClick={() => onCancel(transaction)}>Annuler</button>}</td>}
+      {canManage && <td>{!canceled && <div className="row-actions">{onReceipt && (transaction.type_operation === "transfert_unites" || transaction.type_operation === "approvisionnement_unites") && <button className="row-action soft" title="Préparer un reçu" onClick={() => onReceipt(transaction)}>Reçu</button>}<button className="row-action" title="Annuler avec un motif" onClick={() => onCancel(transaction)}>Annuler</button></div>}</td>}
     </tr>;
   })}</tbody></table></div>;
 }
 
-function CashPage({ date, isHistorical, user, points, operators, selectedSession, selectedSummary, summaries, selectedSessionId, onSessionChange, units, expenses, agents, canWrite, onOpenModal, onOpenOwnSession }) {
+function UnitsPage({
+  date, reportRange, period, onPeriodChange, stock, journal, summary, operators, points, pointById,
+  agents, canManage, canWrite, onOpenModal, onOpenUnit, onCancel, onExport, onGo,
+  forecasts = [], tariffs = [], onOpenReceipt, onOpenTariff,
+}) {
+  const [operatorFilter, setOperatorFilter] = useState("tous");
+  const [typeFilter, setTypeFilter] = useState("tous");
+  const [hideCancelled, setHideCancelled] = useState(false);
+  const rows = journal
+    .filter((transaction) => operatorFilter === "tous" || transaction.operateur_code === operatorFilter)
+    .filter((transaction) => typeFilter === "tous" || transaction.type_operation === typeFilter)
+    .filter((transaction) => !hideCancelled || !transaction.annulee_le);
+  const filtered = summarizeUnitMovements(rows);
+  const periodLabel = reportRange.startDate === reportRange.endDate
+    ? formatDate(reportRange.endDate)
+    : `${formatDate(reportRange.startDate)} — ${formatDate(reportRange.endDate)}`;
+  const sells = summary.valid.filter((transaction) => transaction.type_operation === "transfert_unites");
+  const averageSale = sells.length ? Math.round(summary.sold / sells.length) : 0;
+
+  return (
+    <main className="content-area">
+      <PageHeading
+        eyebrow={`UNITÉS · ${formatDate(date)}`}
+        title="Unités & transferts"
+        description="Stock d'unités par opérateur, approvisionnements, transferts aux clients et écarts de comptage — séparés du float et des espèces."
+        actions={<>
+          <button className="button button-outline" onClick={onExport}><Download size={16} />CSV unités</button>
+          {canWrite && <button className="button button-soft" onClick={() => onOpenModal("unit-appro")}><ArrowDownCircle size={16} />Approvisionner</button>}
+          {canWrite && <button className="button button-outline" onClick={() => onOpenModal("unit-ajustement")}><AlertTriangle size={16} />Ajustement</button>}
+          {canWrite && <button className="button button-dark" onClick={() => onOpenModal("unit-vente")}><ArrowUpCircle size={16} />Transfert client</button>}
+        </>}
+      />
+
+      {stock.alerts.length > 0 && <div className="alert-card low-unit-alert">
+        <div className="alert-mark"><Package size={18} /></div>
+        <div>
+          <strong>{stock.alerts.length} opérateur{stock.alerts.length > 1 ? "s" : ""} à réapprovisionner</strong>
+          <span>{stock.alerts.map((row) => `${row.nom} · ${UNIT_LEVELS[row.niveau].label.toLowerCase()} : ${formatMoney(row.theorique)} (seuil ${formatMoney(row.seuil)})`).join(" — ")}. Un transfert client est refusé lorsque le stock théorique est atteint.</span>
+        </div>
+        {canWrite && <button className="text-button" onClick={() => onOpenModal("unit-appro")}>Approvisionner <ArrowRight size={15} /></button>}
+      </div>}
+
+      {(stock.untrackedSessions > 0 || stock.untrackedClosed > 0) && <div className="alert-card unit-untracked-alert">
+        <div className="alert-mark"><LockKeyhole size={18} /></div>
+        <div>
+          <strong>{stock.untrackedSessions + stock.untrackedClosed} session{stock.untrackedSessions + stock.untrackedClosed > 1 ? "s" : ""} sans stock initial suivi</strong>
+          <span>Ces sessions ont été ouvertes avant le suivi des unités : leur comptage de clôture reste conservé, mais aucun écart d'unités n'est calculé. Si l'une est encore ouverte, clôturez-la puis ouvrez une nouvelle session avec le stock de départ.</span>
+        </div>
+        <button className="text-button" onClick={() => onGo("caisse")}>Voir la caisse <ArrowRight size={15} /></button>
+      </div>}
+
+      <div className="kpi-grid">
+        <KpiCard
+          label="Stock d'unités disponible"
+          value={formatMoney(stock.totalStock)}
+          hint={`${stock.liveSessionCount} session${stock.liveSessionCount > 1 ? "s" : ""} en cours · ${stock.tracked ? "tous les opérateurs suivis" : stock.liveSessionCount ? "suivi partiel" : "aucune session ouverte"}`}
+          icon={Package}
+          tone={stock.alerts.length ? "red" : "teal"}
+        />
+        <KpiCard
+          label="Approvisionnements de la période"
+          value={formatMoney(summary.approved)}
+          hint={`${summary.valid.filter((item) => item.type_operation === "approvisionnement_unites").length} achat(s) · payé en espèces ${formatMoney(summary.cashOut)}`}
+          icon={ArrowDownCircle}
+          tone="blue"
+        />
+        <KpiCard
+          label="Transferts aux clients"
+          value={formatMoney(summary.sold)}
+          hint={`${sells.length} vente(s) · panier moyen ${formatMoney(averageSale)} · encaissé espèces ${formatMoney(summary.cashIn)}`}
+          icon={ArrowUpCircle}
+          tone="gold"
+        />
+        <KpiCard
+          label="Marge sur les unités"
+          value={formatMoney(summary.margin)}
+          hint={`Prix de vente − valeur faciale${tariffs.length ? ` · ${tariffs.length} barème(s) de vente` : " · aucun barème de vente"}`}
+          icon={PiggyBank}
+          tone={summary.margin < 0 ? "red" : "teal"}
+        />
+        <KpiCard
+          label="Commissions unités"
+          value={formatMoney(summary.commissions)}
+          hint={summary.commissionsToVerify ? `${summary.commissionsToVerify} transfert(s) sans commission réelle saisie` : "Toutes les commissions constatées sont saisies"}
+          icon={HandCoins}
+          tone="ink"
+        />
+      </div>
+
+      <section className="panel unit-stock-board">
+        <div className="panel-heading">
+          <div>
+            <h2>Stock par opérateur</h2>
+            <p>Sessions ouvertes · ouverture + approvisionnements − transferts clients · valeur faciale FCFA · {points.length > 1 ? "seuil le plus élevé des points affichés" : `seuil du point ${points[0]?.nom || ""}`}</p>
+          </div>
+          <span className="unit-stock-total">{formatMoney(stock.totalStock)}</span>
+        </div>
+        <div className="unit-cards">
+          {operators.map((operator) => {
+            const row = stock.byCode[operator.code];
+            if (!row) return null;
+            const threshold = row.seuil && row.seuil > 0 ? row.seuil : 0;
+            const gaugeMax = threshold ? threshold * 3 : Math.max(1, row.theorique);
+            const ratio = Math.max(0, Math.min(100, (row.theorique / gaugeMax) * 100));
+            const level = UNIT_LEVELS[row.niveau] || UNIT_LEVELS.non_suivi;
+            return <article className={`unit-card level-${row.niveau}`} key={operator.code}>
+              <div className="unit-card-head">
+                <span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator.couleur }} />{operator.nom}</span>
+                <span className={`unit-level-badge ${row.niveau}`}>{level.label}</span>
+              </div>
+              <strong className="unit-card-value">{row.suivi ? formatMoney(row.theorique) : "—"}</strong>
+              <div className="unit-gauge" role="img" aria-label={`Stock ${formatMoney(row.theorique)} sur un seuil de ${row.seuil == null ? "aucun seuil" : formatMoney(row.seuil)}`}>
+                <div className={`unit-gauge-fill ${row.niveau}`} style={{ width: `${row.suivi ? Math.max(ratio, row.theorique > 0 ? 4 : 0) : 0}%`, "--operator-color": operator.couleur }} />
+                {threshold > 0 && <span className="unit-gauge-mark" style={{ left: "33.33%" }} />}
+              </div>
+              <div className="unit-card-meta">
+                <span>Seuil {row.seuil == null ? "non défini" : formatMoney(row.seuil)}</span>
+                <span>Ouverture {formatMoney(row.ouverture)}</span>
+              </div>
+              <div className="unit-card-stats">
+                <div><span>Achats</span><strong className="positive">+{formatMoney(row.approvisionnements)}</strong></div>
+                <div><span>Ventes</span><strong className="negative">−{formatMoney(row.ventes)}</strong></div>
+                <div><span>Écart clôture</span><strong className={row.ecart && row.ecart !== 0 ? "negative" : ""}>{row.ecart == null ? "—" : formatMoney(row.ecart)}</strong></div>
+              </div>
+              <div className="unit-card-actions">
+                {canWrite && <button className="button button-soft" onClick={() => onOpenUnit("unit-appro", operator.code)}><ArrowDownCircle size={14} />Approvisionner</button>}
+                {canWrite && <button className="button button-outline" disabled={!row.suivi || row.theorique <= 0} onClick={() => onOpenUnit("unit-vente", operator.code)}><ArrowUpCircle size={14} />Vendre</button>}
+              </div>
+            </article>;
+          })}
+        </div>
+      </section>
+
+      {forecasts.length > 0 && <section className="panel unit-forecast-panel">
+        <div className="panel-heading">
+          <div><h2>Prévision de rupture</h2><p>Moyenne des sorties récentes · stock disponible · recommandation sur 7 jours</p></div>
+          <button className="text-button" onClick={() => onGo("pilotage")}>Pilotage complet <ArrowRight size={14} /></button>
+        </div>
+        <div className="unit-forecast-grid">{forecasts.map((row) => {
+          const max = Math.max(1, ...row.series.map((point) => point.consumption));
+          return <div className={`unit-forecast ${row.level}`} key={row.code}>
+            <div className="unit-forecast-head"><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": row.couleur }} />{row.nom}</span><span className={`forecast-badge ${row.level === "rupture" || row.level === "critique" ? "red" : row.level === "bas" ? "gold" : "teal"}`}>{row.daysOfCover == null ? "aucune vente" : `${row.daysOfCover.toFixed(1)} j`}</span></div>
+            <div className="forecast-bars small" aria-hidden>{row.series.map((point) => <span key={point.date} className="forecast-bar" style={{ height: `${Math.max(4, (point.consumption / max) * 100)}%` }} title={`${point.date} : ${formatMoney(point.consumption)}`} />)}</div>
+            <div className="unit-forecast-foot"><span>Moy. {formatMoney(Math.round(row.averageDaily))}/j</span><strong>{row.recommended > 0 ? `Commander ${formatMoney(row.recommended)}` : "Stock suffisant"}</strong></div>
+          </div>;
+        })}</div>
+      </section>}
+
+      {tariffs.length > 0 && <section className="panel tariff-strip">
+        <div className="panel-heading"><div><h2>Barèmes de vente d'unités</h2><p>Prix appliqué au client pour 100 F de valeur faciale</p></div>{canWrite && <button className="button button-soft" onClick={onOpenTariff}><Plus size={15} />Ajouter</button>}</div>
+        <div className="tariff-rows">{tariffs.filter((tariff) => tariff.actif !== false).map((tariff) => {
+          const operator = operators.find((item) => item.code === tariff.operateur_code);
+          const margin = Number(tariff.prix_vente) - Number(tariff.prix_valeur_faciale);
+          return <div className="tariff-row" key={tariff.id}>
+            <span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator?.couleur }} />{operator?.nom || tariff.operateur_code}</span>
+            <span>{tariff.prix_vente} F pour {tariff.prix_valeur_faciale} F</span>
+            <strong className={margin < 0 ? "negative" : "positive"}>{formatMoney(margin)} de marge</strong>
+            <small>{(tariff.source || "Source non renseignée")}</small>
+          </div>;
+        })}</div>
+      </section>}
+
+      <div className="units-columns">
+        <section className="panel units-journal-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Journal des mouvements d'unités</h2>
+              <p>{periodLabel} · {rows.length} ligne{rows.length > 1 ? "s" : ""} · {points.length > 1 ? "tous les points" : points[0]?.nom || "point"}</p>
+            </div>
+            <button className="text-button" onClick={onExport}><Download size={15} />Exporter</button>
+          </div>
+          <div className="unit-toolbar">
+            <label><span>Période</span><select value={period} onChange={(event) => onPeriodChange(event.target.value)}><option value="day">Jour sélectionné</option><option value="week">7 derniers jours</option><option value="month">30 derniers jours</option></select></label>
+            <label><span>Opérateur</span><select value={operatorFilter} onChange={(event) => setOperatorFilter(event.target.value)}><option value="tous">Tous</option>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></label>
+            <label><span>Mouvement</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="tous">Tous</option>{UNIT_OPERATION_TYPES.map((operation) => <option key={operation.code} value={operation.code}>{operation.shortLabel}</option>)}</select></label>
+            <label className="unit-checkbox"><input type="checkbox" checked={hideCancelled} onChange={(event) => setHideCancelled(event.target.checked)} /><span>Masquer les annulées</span></label>
+          </div>
+          <div className="unit-inline-stats">
+            <div><span>Approvisionnements</span><strong>+{formatMoney(filtered.approved)}</strong></div>
+            <div><span>Transferts clients</span><strong>−{formatMoney(filtered.sold)}</strong></div>
+            <div><span>Commissions</span><strong>{formatMoney(filtered.commissions)}</strong></div>
+            <div><span>Flux espèces net</span><strong className={filtered.netCash < 0 ? "negative" : "positive"}>{formatMoney(filtered.netCash)}</strong></div>
+          </div>
+          {rows.length
+            ? <UnitMovementTable rows={rows} operators={operators} agents={agents} pointById={pointById} canManage={canManage && canWrite} onCancel={onCancel} onReceipt={onOpenReceipt} tariffs={tariffs} />
+            : <div className="empty-state compact"><Package size={24} /><strong>Aucun mouvement d'unités sur cette sélection.</strong><span>Approvisionnez le stock depuis un grossiste ou enregistrez un transfert vendu à un client.</span>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("unit-appro")}>Approvisionner</button>}</div>}
+        </section>
+
+        <aside className="units-side">
+          <section className="panel unit-guide">
+            <div className="panel-heading"><div><h2>Repères de gestion</h2><p>Ce que la section calcule, et ce qu'elle ne fait pas.</p></div><Package size={19} className="panel-heading-icon" /></div>
+            <div className="unit-guide-list">
+              <div><span className="unit-guide-num">1</span><div><strong>Stock théorique</strong><p>Ouverture de session + approvisionnements − transferts clients, par opérateur, en valeur faciale FCFA.</p></div></div>
+              <div><span className="unit-guide-num">2</span><div><strong>Règlement</strong><p>Un approvisionnement en espèces réduit la caisse physique ; réglé par wallet, il réduit le float choisi. Une vente fait l'inverse.</p></div></div>
+              <div><span className="unit-guide-num">3</span><div><strong>Seuil d'alerte</strong><p>Configuré à la création du point. Sous ce seuil, la carte passe en « stock bas » ; à zéro, en « rupture ».</p></div></div>
+              <div><span className="unit-guide-num">4</span><div><strong>Écart de comptage</strong><p>Comparé au stock déclaré à la clôture de chaque session suivie. Aucun écart n'est inventé sur les anciennes sessions.</p></div></div>
+            </div>
+            <div className="unit-guide-foot"><AlertTriangle size={15} /><span>Kaisse enregistre la vente d'unités, mais n'envoie aucune recharge : le transfert reste effectué sur le téléphone ou le portail opérateur.</span></div>
+          </section>
+
+          <section className="panel unit-balance-panel">
+            <div className="panel-heading"><div><h2>Rapprochement du jour</h2><p>Écarts calculés sur les sessions clôturées.</p></div><ShieldCheck size={19} className="panel-heading-icon" /></div>
+            {stock.ecartsCalculables > 0 ? <>
+              <div className="unit-balance-total">
+                <span>Écart d'unités cumulé</span>
+                <strong className={stock.totalEcart === 0 ? "positive" : "negative"}>{stock.totalEcart > 0 ? "+" : ""}{formatMoney(stock.totalEcart)}</strong>
+              </div>
+              <div className="unit-balance-rows">
+                {stock.operators.filter((row) => row.ecart != null && row.ecart !== 0).map((row) => <div key={row.code}><span>{row.nom}</span><strong className="negative">{row.ecart > 0 ? "+" : ""}{formatMoney(row.ecart)}</strong></div>)}
+                {stock.operators.every((row) => row.ecart == null || row.ecart === 0) && <div><span>Aucun écart déclaré</span><strong className="positive">0 F</strong></div>}
+              </div>
+            </> : <div className="empty-inline">Aucune session clôturée avec stock suivi pour cette date. L'écart apparaîtra après le comptage de clôture.</div>}
+            <div className="unit-margin-line"><span>Marge de la période</span><strong className={summary.margin < 0 ? "negative" : "positive"}>{formatMoney(summary.margin)}</strong></div>
+            <button className="text-button" onClick={() => onGo("caisse")}>Ouvrir Caisse & clôture <ArrowRight size={14} /></button>
+          </section>
+
+          <section className="panel unit-top-panel">
+            <div className="panel-heading"><div><h2>Unités transférées par opérateur</h2><p>Ventes de la période sélectionnée.</p></div><TrendingUp size={19} className="panel-heading-icon" /></div>
+            <div className="unit-top-rows">
+              {operators.map((operator) => {
+                const row = stock.byCode[operator.code];
+                const max = Math.max(1, ...operators.map((item) => stock.byCode[item.code]?.ventes || 0));
+                return <div className="unit-top-row" key={operator.code}>
+                  <span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator.couleur }} />{operator.nom}</span>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(row?.ventes ? 5 : 0, ((row?.ventes || 0) / max) * 100)}%`, "--operator-color": operator.couleur }} /></div>
+                  <strong>{formatMoney(row?.ventes || 0)}</strong>
+                </div>;
+              })}
+            </div>
+          </section>
+        </aside>
+      </div>
+
+      <div className="ledger-footnote"><ShieldCheck size={17} /><span>Les montants d'unités sont des valeurs faciales saisies par l'agence. Les bonus, remises et prix de vente supérieurs à la valeur faciale se suivent dans la commission réelle.</span></div>
+    </main>
+  );
+}
+
+function UnitMovementTable({ rows, operators, agents, pointById, canManage, onCancel, onReceipt, tariffs = [] }) {
+  return <div className="table-scroll"><table className="data-table unit-table">
+    <thead><tr><th>Heure</th><th>Mouvement</th><th>Opérateur</th><th>Valeur faciale</th><th>Règlement</th><th>Commission</th><th>Agent · point</th><th>Statut</th>{canManage && <th />}</tr></thead>
+    <tbody>{rows.map((transaction) => {
+      const operator = operators.find((item) => item.code === transaction.operateur_code);
+      const agent = agents.get(transaction.agent_id);
+      const isSale = transaction.type_operation === "transfert_unites";
+      const isAdjustment = transaction.type_operation === "ajustement_unites";
+      const effectiveRate = (() => {
+        const tariff = tariffs.find((row) => row.actif !== false && row.operateur_code === transaction.operateur_code);
+        if (!tariff || !transaction.montant) return null;
+        return Number(transaction.montant_reglement ?? transaction.montant) / Number(transaction.montant);
+      })();
+      const settledByWallet = transaction.mode_paiement_unites === "wallet";
+      const paymentOperator = operators.find((item) => item.code === transaction.operateur_paiement_code);
+      const canceled = Boolean(transaction.annulee_le);
+      const commission = transaction.commission_reelle ?? transaction.commission_estimee;
+      return <tr key={transaction.id} className={canceled ? "cancelled-row" : ""}>
+        <td className="time-cell">{formatTime(transaction.created_at)}</td>
+        <td><div className="operation-cell"><strong>{isAdjustment ? `Ajustement ${transaction.ajustement_sens === "entree" ? "entrée" : "sortie"}` : isSale ? "Transfert client" : "Approvisionnement"}</strong>{(transaction.beneficiaire_masque || transaction.note) && <small>{transaction.beneficiaire_masque ? `Bénéficiaire ${transaction.beneficiaire_masque}` : transaction.note}</small>}{transaction.reference && <small>Réf. {transaction.reference}</small>}{effectiveRate && effectiveRate !== 1 && <small>{effectiveRate > 1 ? "Vendu" : "Acheté"} à {(effectiveRate * 100).toFixed(0)} % de la valeur faciale</small>}{canceled && <small className="cancel-note">Annulée · {transaction.motif_annulation}</small>}</div></td>
+        <td><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator?.couleur || "#95a0a6" }} />{operator?.nom || transaction.operateur_code}</span></td>
+        <td className={isAdjustment ? "amount-cell" : isSale ? "amount-cell negative" : "amount-cell positive"}>{isAdjustment ? (transaction.ajustement_sens === "entree" ? "+" : "−") : isSale ? "−" : "+"}{formatMoney(transaction.montant)}</td>
+        <td><div className="operation-cell"><strong>{isAdjustment ? "Aucun" : settledByWallet ? `Float ${paymentOperator?.nom || transaction.operateur_paiement_code || ""}` : "Espèces"}</strong><small>{isAdjustment ? "stock seul" : `${isSale ? "encaissé" : "payé"} ${formatMoney(settlementAmount(transaction))}`}</small></div></td>
+        <td className="commission-cell">{isSale ? <><strong>{formatMoney(commission)}</strong>{transaction.commission_reelle == null && <small>estimée</small>}</> : <strong>—</strong>}</td>
+        <td><div className="operation-cell"><strong>{agent ? `${agent.prenom} ${agent.nom}`.trim() : "Agent"}</strong><small>{pointById.get(transaction.point_id)?.nom || "Point"}</small></div></td>
+        <td><span className={`unit-status ${canceled ? "cancelled" : ""}`}>{canceled ? "Annulée" : "Validée"}</span></td>
+        {canManage && <td>{!canceled && <div className="row-actions">{onReceipt && isSale && <button className="row-action soft" title="Préparer un reçu" onClick={() => onReceipt(transaction)}>Reçu</button>}<button className="row-action" onClick={() => onCancel(transaction)}>Annuler</button></div>}</td>}
+      </tr>;
+    })}</tbody>
+  </table></div>;
+}
+
+function UnitMovementModal({ variant = "appro", initialOperator = "", sessions, summaries, points, operators, rules, stock, tariffs = [], onClose, onSave }) {
+  const [mode, setMode] = useState(variant);
+  const [sessionId, setSessionId] = useState(sessions[0]?.id || "");
+  const [operatorCode, setOperatorCode] = useState(
+    operators.some((operator) => operator.code === initialOperator) ? initialOperator : operators[0]?.code || "orange",
+  );
+  const [amount, setAmount] = useState("");
+  const [settlement, setSettlement] = useState("");
+  const [paymentMode, setPaymentMode] = useState("especes");
+  const [paymentOperatorCode, setPaymentOperatorCode] = useState(operators[0]?.code || "orange");
+  const [commissionActual, setCommissionActual] = useState("");
+  const [beneficiary, setBeneficiary] = useState("");
+  const [reference, setReference] = useState("");
+  const [adjustmentSens, setAdjustmentSens] = useState("sortie");
+  const [motif, setMotif] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const isSale = mode === "vente";
+  const isAdjustment = mode === "ajustement";
+  const typeOperation = isAdjustment ? "ajustement_unites" : isSale ? "transfert_unites" : "approvisionnement_unites";
+  const selectedSession = sessions.find((session) => session.id === sessionId);
+  const selectedSummary = summaries.find(({ session }) => session.id === sessionId)?.totals;
+  const moneyPlaceholder = amount || "Même montant";
+  const available = selectedSummary?.unitMap?.[operatorCode]?.theorique ?? stock.byCode[operatorCode]?.theorique ?? 0;
+  const unitTracked = selectedSummary?.unitTracked ?? stock.byCode[operatorCode]?.suivi ?? false;
+  const tariff = tariffs.find((row) => row.actif !== false && row.operateur_code === operatorCode);
+  const suggestedSettlement = isSale && tariff
+    ? Math.round((Number(amount || 0) * Number(tariff.prix_vente)) / Math.max(1, Number(tariff.prix_valeur_faciale)))
+    : Number(amount || 0);
+  const estimate = isSale || isAdjustment ? calculateCommission({ type_operation: typeOperation, operateur_code: operatorCode, montant: amount }, rules) : 0;
+  const maskedPreview = maskBeneficiary(beneficiary);
+  const projectedStock = available + (isSale ? -1 : isAdjustment ? (adjustmentSens === "entree" ? 1 : -1) : 1) * Number(amount || 0);
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    try {
+      if (!sessionId) throw new Error("Vous n'avez pas de session ouverte avec ce compte.");
+      if (!unitTracked) throw new Error("Le stock initial n'est pas suivi sur cette session. Clôturez-la, puis ouvrez une nouvelle session avec le stock de départ.");
+      const money = safeAmount(amount, "La valeur des unités");
+      if (isSale || (isAdjustment && adjustmentSens === "sortie")) {
+        const check = canSellUnits({ available, amount: money });
+        if (!check.ok) throw new Error(check.message);
+      }
+      if (isAdjustment && motif.trim().length < 3) throw new Error("Indiquez le motif de l'ajustement (cassee, perte, erreur de comptage…).");
+      if (paymentMode === "wallet" && !isAdjustment && !paymentOperatorCode) throw new Error("Choisissez l'opérateur utilisé pour le règlement.");
+      const realCommission = isSale
+        ? (commissionActual.trim() === "" ? null : safeAmount(commissionActual, "La commission", true))
+        : 0;
+      const regulated = isAdjustment || settlement.trim() === ""
+        ? money
+        : safeAmount(settlement, "Le montant réellement réglé", true);
+      setLoading(true);
+      await onSave({
+        session_id: sessionId,
+        type_operation: typeOperation,
+        operateur_code: operatorCode,
+        operateur_destination_code: null,
+        montant: money,
+        montant_reglement: isAdjustment ? null : regulated,
+        commission_estimee: estimate,
+        commission_reelle: realCommission,
+        mode_paiement_unites: isAdjustment ? null : paymentMode,
+        operateur_paiement_code: !isAdjustment && paymentMode === "wallet" ? paymentOperatorCode : null,
+        ajustement_sens: isAdjustment ? adjustmentSens : null,
+        beneficiaire_masque: isSale ? maskedPreview : null,
+        reference: reference.trim(),
+        note: isAdjustment ? motif.trim() : "",
+      });
+      onClose();
+    } catch (saveError) {
+      setError(makeErrorMessage(saveError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return <ModalShell
+    title={isAdjustment ? "Ajuster le stock d'unités" : isSale ? "Transfert d'unités à un client" : "Approvisionner le stock d'unités"}
+    subtitle="Mouvement d'unités rattaché à votre session ouverte, séparé du float."
+    onClose={onClose}
+    wide
+  >
+    {sessions.length ? <form className="modal-form" onSubmit={submit}>
+      <div className="operation-type-picker unit-mode-picker three">
+        <button type="button" className={!isSale && !isAdjustment ? "active" : ""} onClick={() => setMode("appro")}><ArrowDownCircle size={15} />Approvisionnement</button>
+        <button type="button" className={isSale ? "active" : ""} onClick={() => setMode("vente")}><ArrowUpCircle size={15} />Transfert client</button>
+        <button type="button" className={isAdjustment ? "active" : ""} onClick={() => setMode("ajustement")}><AlertTriangle size={15} />Ajustement</button>
+      </div>
+      <FormField label="Session de caisse"><select value={sessionId} onChange={(event) => setSessionId(event.target.value)}>{sessions.map((session) => <option key={session.id} value={session.id}>{points.find((point) => point.id === session.point_id)?.nom || "Point"} · {formatTime(session.ouverte_le)}</option>)}</select></FormField>
+      <div className="form-row">
+        <FormField label="Opérateur du stock"><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>
+        {!isAdjustment && <FormField label={isSale ? "Le client règle par" : "Approvisionnement payé depuis"}><select value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)}><option value="especes">Espèces</option><option value="wallet">Float électronique</option></select></FormField>}
+        {isAdjustment && <FormField label="Sens de l'ajustement"><select value={adjustmentSens} onChange={(event) => setAdjustmentSens(event.target.value)}><option value="sortie">Sortie (perte, casse, vol)</option><option value="entree">Entrée (erreur de comptage)</option></select></FormField>}
+      </div>
+      {!isAdjustment && paymentMode === "wallet" && <FormField label={isSale ? "Float crédité" : "Float débité"}><select value={paymentOperatorCode} onChange={(event) => setPaymentOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}
+      <FormField
+        label={isAdjustment ? "Valeur de l'ajustement (FCFA)" : "Valeur faciale des unités (FCFA)"}
+        hint={isSale
+          ? `Stock disponible : ${formatMoney(available)} · vente plafonnée à ce montant.`
+          : isAdjustment
+            ? "Corrige le stock sans toucher aux espèces ni au float."
+            : "Le même montant ajuste le stock et le règlement (espèces ou wallet)."}
+      >
+        <input type="number" min="1" step="1" inputMode="numeric" required autoFocus value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Ex. 5 000" />
+      </FormField>
+      {!isAdjustment && <FormField
+        label={isSale ? "Montant réellement encaissé (FCFA)" : "Montant réellement payé (FCFA)"}
+        hint={`Vide = valeur faciale (${formatMoney(suggestedSettlement)}).${isSale && tariff ? ` Barème : ${tariff.prix_vente} F pour ${tariff.prix_valeur_faciale} F de crédit.` : ""}`}
+      >
+        <input type="number" min="0" step="1" inputMode="numeric" value={settlement} onChange={(event) => setSettlement(event.target.value)} placeholder={String(suggestedSettlement || "")} />
+      </FormField>}
+      {isSale && <div className="form-row">
+        <FormField label="Numéro du bénéficiaire (facultatif)" hint={maskedPreview ? `Enregistré masqué : ${maskedPreview}` : "Seuls 2 chiffres au début et à la fin sont conservés."}>
+          <input value={beneficiary} onChange={(event) => setBeneficiary(event.target.value)} inputMode="tel" maxLength={20} placeholder="07 00 00 00 00" />
+        </FormField>
+        <FormField label="Référence (facultatif)" hint="Référence courte du reçu ou du SMS opérateur."><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="Ex. OM-1042" /></FormField>
+      </div>}
+      {isAdjustment && <div className="form-row">
+        <FormField label="Motif obligatoire" hint="Casse, perte, vol, erreur de comptage…"><input required value={motif} onChange={(event) => setMotif(event.target.value)} maxLength={160} placeholder="Ex. cartes abîmées" /></FormField>
+        <FormField label="Référence (facultatif)"><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="Ex. PROCES-12" /></FormField>
+      </div>}
+      {!isSale && !isAdjustment && <FormField label="Référence (facultatif)"><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="Bon de livraison grossiste" /></FormField>}
+      {isSale && <div className="commission-entry">
+        <div><HandCoins size={16} /><span>Commission estimée</span><strong>{formatMoney(estimate)}</strong></div>
+        <FormField label="Commission réellement constatée (facultatif)"><input type="number" min="0" step="1" inputMode="numeric" value={commissionActual} onChange={(event) => setCommissionActual(event.target.value)} placeholder="Laisser vide si inconnue" /></FormField>
+      </div>}
+      {isSale && !rules.some((rule) => rule.operateur_code === operatorCode && rule.type_operation === typeOperation) && <div className="field-note"><AlertTriangle size={14} />Aucun barème pour le transfert d'unités de cet opérateur : l'estimation vaut 0. Ajoutez une tranche dans Réglages.</div>}
+      <div className="movement-hint">
+        <InfoLine type={typeOperation} operator={operators.find((operator) => operator.code === operatorCode)?.nom} paymentMode={paymentMode} paymentOperator={operators.find((operator) => operator.code === paymentOperatorCode)?.nom} />
+        <span>Stock après opération : {formatMoney(Math.max(0, projectedStock))}</span>
+      </div>
+      {isSale && <div className="field-note"><ReceiptText size={14} />Un reçu peut être préparé depuis le journal des unités après l'enregistrement.</div>}
+      {!unitTracked && <div className="field-note"><AlertTriangle size={14} />Cette session n'a pas de stock initial suivi : les mouvements d'unités y sont bloqués.</div>}
+      {selectedSession && <div className="field-note"><Clock3 size={14} />Session ouverte à {formatTime(selectedSession.ouverte_le)} · mouvement horodaté à l'enregistrement.</div>}
+      <ModalError>{error}</ModalError>
+      <ModalActions onCancel={onClose} loading={loading} label={isAdjustment ? "Enregistrer l'ajustement" : isSale ? "Enregistrer le transfert" : "Enregistrer l'approvisionnement"} />
+    </form> : <div className="modal-empty"><Wallet size={25} /><strong>Aucune session ouverte pour votre compte.</strong><span>Ouvrez une caisse avant de saisir un mouvement d'unités.</span><button type="button" className="button button-dark" onClick={onClose}>Compris</button></div>}
+  </ModalShell>;
+}
+
+function CashPage({ date, isHistorical, user, points, operators, selectedSession, selectedSummary, summaries, selectedSessionId, onSessionChange, units, expenses, agents, canWrite, onOpenModal, onOpenOwnSession, cashMovements = [] }) {
   const ownOpen = summaries.some(({ session }) => session.agent_id === user.id && session.statut === "ouverte");
   const sessionExpenses = expenses.filter((expense) => expense.session_id === selectedSession?.id);
   const sessionUnitRows = units.filter((row) => row.session_id === selectedSession?.id);
   const operatorRows = operators.map((operator) => ({ operator, balance: selectedSummary?.floatMap?.[operator.code] }));
   return (
     <main className="content-area">
-      <PageHeading eyebrow={`CAISSE · ${formatDate(date)}`} title="Caisse & clôture" description="Comparez les soldes théoriques aux montants réellement déclarés par l'agent." actions={<>{selectedSession?.statut === "ouverte" && canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Saisir une dépense</button>}{selectedSession?.statut === "ouverte" && selectedSession.agent_id === user.id && <button className="button button-dark" onClick={() => onOpenModal("close-session")}><CheckCircle2 size={16} />Clôturer la session</button>}{isHistorical && <span className="read-only-pill"><LockKeyhole size={14} />Historique en lecture</span>}</>} />
+      <PageHeading eyebrow={`CAISSE · ${formatDate(date)}`} title="Caisse & clôture" description="Comparez les soldes théoriques aux montants réellement déclarés par l'agent." actions={<>{selectedSession?.statut === "ouverte" && canWrite && <button className="button button-outline" onClick={() => onOpenModal("cash")}><Landmark size={16} />Mouvement d'espèces</button>}{selectedSession?.statut === "ouverte" && canWrite && <button className="button button-soft" onClick={() => onOpenModal("expense")}><TrendingDown size={16} />Saisir une dépense</button>}{selectedSession?.statut === "ouverte" && selectedSession.agent_id === user.id && <button className="button button-dark" onClick={() => onOpenModal("close-session")}><CheckCircle2 size={16} />Clôturer la session</button>}{isHistorical && <span className="read-only-pill"><LockKeyhole size={14} />Historique en lecture</span>}</>} />
       <div className="cash-toolbar"><div className="cash-toolbar-copy"><strong>Session sélectionnée</strong><span>Chaque session garde ses propres soldes d'ouverture et de clôture.</span></div><select value={selectedSessionId} onChange={(event) => onSessionChange(event.target.value)}><option value="">Aucune session</option>{summaries.map(({ session }) => <option key={session.id} value={session.id}>{points.find((point) => point.id === session.point_id)?.nom || "Point"} · {agents.get(session.agent_id)?.prenom || "Agent"} · {session.statut === "ouverte" ? "ouverte" : "clôturée"}</option>)}</select>{!ownOpen && !isHistorical && canWrite && <button className="button button-gold" onClick={onOpenOwnSession}><Plus size={15} />Ouvrir ma caisse</button>}</div>
       {selectedSession && selectedSummary ? <>
         <div className="cash-status-card"><div className={`cash-status-icon ${selectedSession.statut === "cloturee" ? (selectedSummary.cashVariance === 0 && !selectedSummary.floatHasDifference && selectedSummary.unitTracked && !selectedSummary.unitHasDifference ? "done" : "issue") : "live"}`}>{selectedSession.statut === "cloturee" ? <CheckCircle2 size={19} /> : <Clock3 size={19} />}</div><div><strong>{selectedSession.statut === "cloturee" ? "Session clôturée" : "Session en cours"}</strong><span>{points.find((point) => point.id === selectedSession.point_id)?.nom || "Point"} · {agents.get(selectedSession.agent_id)?.prenom || "Agent"} {agents.get(selectedSession.agent_id)?.nom || ""} · {selectedSession.ouverte_le ? `ouverte à ${formatTime(selectedSession.ouverte_le)}` : ""}</span></div><div className="cash-status-right"><span>{selectedSession.statut === "cloturee" ? "Écart espèces" : "Espèces théoriques"}</span><strong className={selectedSummary.cashVariance < 0 ? "negative" : ""}>{selectedSession.statut === "cloturee" ? formatMoney(selectedSummary.cashVariance) : formatMoney(selectedSummary.cashExpected)}</strong></div></div>
@@ -1232,6 +2287,15 @@ function CashPage({ date, isHistorical, user, points, operators, selectedSession
           {selectedSession.statut === "cloturee" && selectedSummary.unitTracked && <VarianceBox declared={selectedSummary.unitDeclared} theoretical={selectedSummary.unitExpected} variance={selectedSummary.unitVariance} />}
           {selectedSession.statut === "cloturee" && selectedSummary.unitTracked && selectedSummary.unitHasDifference && selectedSummary.unitVariance === 0 && <div className="field-note"><AlertTriangle size={14} />Des écarts individuels entre opérateurs se compensent dans le total net; vérifiez les lignes ci-dessus.</div>}
         </section>
+        {cashMovements.length > 0 && <section className="panel cash-movements-panel">
+          <div className="panel-heading"><div><h2>Mouvements d'espèces de la session</h2><p>Dépôt banque, coffre, fonds de caisse</p></div>{selectedSession.statut === "ouverte" && selectedSession.agent_id === user.id && canWrite && <button className="button button-soft" onClick={() => onOpenModal("cash")}><Plus size={15} />Ajouter</button>}</div>
+          <div className="cash-movements-list">{cashMovements.map((movement) => <div className="cash-movement-row" key={movement.id}>
+            <span className={`cash-movement-icon ${movement.sens}`}>{movement.sens === "entree" ? <ArrowDownCircle size={15} /> : <ArrowUpCircle size={15} />}</span>
+            <div><strong>{movement.motif || "Mouvement"}</strong><small>{CASH_MOVEMENT_SOURCES.find((source) => source.code === movement.source)?.label || movement.source} · {formatTime(movement.created_at)}</small></div>
+            <b className={movement.sens === "entree" ? "positive" : "negative"}>{movement.sens === "entree" ? "+" : "−"}{formatMoney(movement.montant)}</b>
+          </div>)}</div>
+        </section>}
+
         <div className="cash-bottom-grid"><section className="panel"><div className="panel-heading"><div><h2>Comptage à la clôture</h2><p>Déclarez ce qui a été compté, pas le montant attendu.</p></div>{selectedSession.statut === "ouverte" && selectedSession.agent_id === user.id && <button className="button button-dark" onClick={() => onOpenModal("close-session")}>Clôturer <ArrowRight size={15} /></button>}</div>{selectedSession.statut === "cloturee" ? <div className="variance-summary"><VarianceBox declared={selectedSummary.cashDeclared} theoretical={selectedSummary.cashExpected} variance={selectedSummary.cashVariance} /><div className="variance-footnote"><AlertTriangle size={15} />Un écart signale une différence à examiner; il ne prouve pas, à lui seul, une erreur ou une fraude.</div></div> : <div className="open-close-hint"><div className="hint-symbol"><Check size={17} /></div><div><strong>La session est ouverte</strong><span>À la fermeture, comptez les espèces, consultez les soldes opérateur et comptez séparément le stock d'unités par opérateur.</span></div></div>}</section>
           <section className="panel expense-panel"><div className="panel-heading"><div><h2>Dépenses de la session</h2><p>Espèces et retraits sur wallet sont rapprochés séparément.</p></div>{selectedSession.statut === "ouverte" && selectedSession.agent_id === user.id && canWrite && <button className="icon-link" onClick={() => onOpenModal("expense")}><Plus size={15} />Ajouter</button>}</div>{sessionExpenses.length ? <div className="expense-list">{sessionExpenses.map((expense) => <div className="expense-row" key={expense.id}><span className="expense-icon"><TrendingDown size={15} /></span><div><strong>{expense.categorie}</strong><small>{expense.mode_paiement === "especes" ? "Espèces" : operators.find((operator) => operator.code === expense.operateur_code)?.nom} · {formatTime(expense.created_at)}</small></div><b>-{formatMoney(expense.montant)}</b></div>)}</div> : <div className="empty-inline">Aucune dépense déclarée.</div>}</section></div>
       </> : <div className="panel empty-state"><Wallet size={26} /><strong>Aucune session à afficher pour cette date.</strong><span>Une session commence avec un point, une caisse physique, les soldes électroniques et le stock initial d'unités par opérateur.</span>{!isHistorical && canWrite && <button className="button button-dark" onClick={onOpenOwnSession}><Plus size={15} />Démarrer une session</button>}</div>}
@@ -1240,12 +2304,7 @@ function CashPage({ date, isHistorical, user, points, operators, selectedSession
   );
 }
 
-function VarianceBox({ declared, theoretical, variance }) {
-  const isZero = Number(variance || 0) === 0;
-  return <div className={`variance-box ${isZero ? "zero" : "has-variance"}`}><div className="variance-main"><span>Écart = déclaré − théorique</span><strong>{variance > 0 ? "+" : ""}{formatMoney(variance)}</strong></div><div className="variance-detail"><span>Déclaré {formatMoney(declared)}</span><span>Théorique {formatMoney(theoretical)}</span></div></div>;
-}
-
-function TeamPage({ agency, user, profiles, points, sessions, summaries, canManage, canWrite, onOpenModal, onCopyCode }) {
+function TeamPage({ agency, user, profiles, points, sessions, summaries, performances = [], canManage, canWrite, onOpenModal, onCopyCode }) {
   const openByAgent = new Map(sessions.filter((session) => session.statut === "ouverte").map((session) => [session.agent_id, session]));
   const activeProfileCount = profiles.filter((profile) => profile.actif).length;
   return (
@@ -1254,12 +2313,43 @@ function TeamPage({ agency, user, profiles, points, sessions, summaries, canMana
       {canManage && canWrite && <section className="invite-card"><div className="invite-icon"><Users size={19} /></div><div className="invite-copy"><span>INVITER UN GÉRANT</span><h2>Partagez le code de votre agence.</h2><p>Le gérant crée son accès avec son propre email et choisit « Rejoindre une équipe ». Ne partagez jamais votre mot de passe.</p></div><div className="invite-code"><small>CODE D'INVITATION</small><strong>{agency.code_invitation || "—"}</strong><button className="button button-paper" onClick={onCopyCode}><Copy size={15} />Copier</button></div></section>}
       <div className="team-columns"><section className="panel team-panel"><div className="panel-heading"><div><h2>Membres de l'équipe</h2><p>{activeProfileCount} profil{activeProfileCount > 1 ? "s" : ""} actif{activeProfileCount > 1 ? "s" : ""}{profiles.length > activeProfileCount ? ` · ${profiles.length - activeProfileCount} désactivé${profiles.length - activeProfileCount > 1 ? "s" : ""}` : ""}</p></div><Users size={19} className="panel-heading-icon" /></div>{profiles.length ? <div className="team-list">{profiles.map((profile) => { const session = openByAgent.get(profile.id); const point = session && points.find((item) => item.id === session.point_id); return <div className="team-member" key={profile.id}><div className="avatar small-avatar">{getInitials(profile)}</div><div className="team-member-name"><strong>{profile.prenom} {profile.nom}</strong><span>{profile.role === "proprietaire" ? "Propriétaire" : profile.role === "gerant" ? "Gérant" : "Agent"}{profile.telephone ? ` · ${profile.telephone}` : ""}{!profile.actif ? " · Accès désactivé" : ""}</span></div><div className={`member-session ${session ? "online" : "offline"}`}><span />{session ? `${profile.actif ? "En session" : "Session ouverte · accès désactivé"} · ${point?.nom || "Point"}` : profile.actif ? "Pas de session ouverte" : "Accès désactivé"}</div></div>; })}</div> : <div className="empty-inline">Aucun profil visible pour votre compte.</div>}</section>
         <section className="panel points-panel"><div className="panel-heading"><div><h2>Points de vente</h2><p>{points.length} point{points.length > 1 ? "s" : ""} configuré{points.length > 1 ? "s" : ""}</p></div><Building2 size={19} className="panel-heading-icon" /></div>{points.length ? <div className="points-list">{points.map((point) => { const opened = sessions.filter((session) => session.point_id === point.id && session.statut === "ouverte").length; const pointSessions = summaries.filter(({ session }) => session.point_id === point.id); const balance = pointSessions.reduce((sum, { session, totals }) => sum + (session.statut === "ouverte" ? totals.floatExpected : Number(totals.floatDeclared || 0)), 0); return <div className="point-row" key={point.id}><div className="point-icon"><Store size={16} /></div><div className="point-meta"><strong>{point.nom}</strong><span><MapPin size={12} />{point.ville || agency.ville}</span></div><div className="point-live"><strong>{formatMoney(balance)}</strong><span>{opened ? `${opened} session${opened > 1 ? "s" : ""} en cours` : "Aucune session active"}</span></div></div>; })}</div> : <div className="empty-inline">Créez votre premier point pour ouvrir une session de caisse.</div>}{canManage && canWrite && <button className="add-point-row" onClick={() => onOpenModal("point")}><Plus size={15} />Ajouter un point de vente</button>}</section></div>
+      <section className="panel performance-panel">
+        <div className="panel-heading"><div><h2>Performance de l'équipe</h2><p>Période affichée · classement par volume d'opérations</p></div><Activity size={19} className="panel-heading-icon" /></div>
+        {performances.length ? <div className="table-scroll"><table className="data-table">
+          <thead><tr><th>Agent</th><th>Rôle</th><th>Opérations</th><th>Volume</th><th>Ticket moyen</th><th>Commissions</th><th>Unités vendues</th><th>Session</th></tr></thead>
+          <tbody>{performances.map((row) => <tr key={row.profile.id}>
+            <td><strong>{row.profile.prenom} {row.profile.nom}</strong></td>
+            <td>{row.profile.role}</td>
+            <td>{row.operations}</td>
+            <td className="amount-cell">{formatMoney(row.volume)}</td>
+            <td>{formatMoney(row.averageTicket)}</td>
+            <td>{formatMoney(row.commissions)}</td>
+            <td>{formatMoney(row.unitsSold)}</td>
+            <td>{row.openSession ? <span className="unit-status">En session</span> : <span className="credit-status muted">Fermée</span>}</td>
+          </tr>)}</tbody>
+        </table></div> : <div className="empty-inline">Aucune activité sur la période.</div>}
+      </section>
       {!canManage && <div className="ledger-footnote"><LockKeyhole size={16} /><span>Seuls le propriétaire et les gérants peuvent voir toute l'équipe et gérer les points.</span></div>}
     </main>
   );
 }
 
-function SettingsPage({ agency, user, subscription, operators, rules, onOpenModal, onResetDemo, canManage, canWrite }) {
+function ThresholdRow({ point, canEdit, onSave }) {
+  const [float, setFloat] = useState(point.seuil_alerte_float ?? "");
+  const [units, setUnits] = useState(point.seuil_alerte_unites ?? "");
+  const dirty = String(float ?? "") !== String(point.seuil_alerte_float ?? "") || String(units ?? "") !== String(point.seuil_alerte_unites ?? "");
+  return <div className="threshold-row">
+    <div className="threshold-name"><strong>{point.nom}</strong><small>{point.ville || ""}</small></div>
+    <label><span>Float (F)</span><input type="number" min="0" step="1" value={float} onChange={(event) => setFloat(event.target.value)} disabled={!canEdit} /></label>
+    <label><span>Unités (F)</span><input type="number" min="0" step="1" value={units} onChange={(event) => setUnits(event.target.value)} disabled={!canEdit} /></label>
+    {canEdit && <button className="button button-soft" disabled={!dirty} onClick={() => onSave(point.id, {
+      seuil_alerte_float: float === "" ? null : Number(float),
+      seuil_alerte_unites: units === "" ? null : Number(units),
+    })}>Enregistrer</button>}
+  </div>;
+}
+
+function SettingsPage({ agency, user, subscription, operators, rules, onOpenModal, onResetDemo, canManage, canWrite, tariffs = [], auditLog = [], agents = new Map(), points = [], statements = [], onShareRecap, onOpenUnit, messages = [], onSaveThreshold }) {
   const planLabel = agency.plan_abonnement === "starter"
     ? "Starter · 10 000 FCFA / 30 jours"
     : agency.plan_abonnement === "pro"
@@ -1336,6 +2426,58 @@ function SettingsPage({ agency, user, subscription, operators, rules, onOpenModa
           <div className="commission-caution"><AlertTriangle size={16} /><span>Un barème calcule une estimation, pas une garantie de paiement. Le montant réellement constaté reste un champ séparé.</span></div>
         </section>
       </div>
+      <div className="settings-grid settings-grid-wide">
+        <section className="panel">
+          <div className="panel-heading">
+            <div><h2>Barèmes de vente d'unités</h2><p>Prix d'achat et de vente pour 100 F de valeur faciale : la marge devient mesurable.</p></div>
+            {canManage && canWrite && <button className="button button-dark" onClick={() => onOpenModal("tarif")}><Plus size={15} />Ajouter un barème</button>}
+          </div>
+          {tariffs.length ? <div className="table-scroll"><table className="data-table">
+            <thead><tr><th>Opérateur</th><th>Valeur faciale</th><th>Prix de vente</th><th>Marge</th><th>Source</th></tr></thead>
+            <tbody>{tariffs.map((tariff) => {
+              const margin = Number(tariff.prix_vente) - Number(tariff.prix_valeur_faciale);
+              return <tr key={tariff.id}>
+                <td>{operators.find((operator) => operator.code === tariff.operateur_code)?.nom || tariff.operateur_code}</td>
+                <td>{formatMoney(tariff.prix_valeur_faciale)}</td>
+                <td>{formatMoney(tariff.prix_vente)}</td>
+                <td className={margin < 0 ? "negative" : "positive"}>{formatMoney(margin)} ({tariff.prix_valeur_faciale ? ((margin / Number(tariff.prix_valeur_faciale)) * 100).toFixed(1) : 0} %)</td>
+                <td>{tariff.source || "Non renseignée"}</td>
+              </tr>;
+            })}</tbody>
+          </table></div> : <div className="empty-state compact"><PiggyBank size={21} /><strong>Aucun barème de vente d'unités.</strong><span>Ajoutez un barème pour que Kaisse calcule la marge et propose le prix à encaisser.</span>{canManage && canWrite && <button className="button button-soft" onClick={() => onOpenModal("tarif")}><Plus size={15} />Configurer</button>}</div>}
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Seuils d'alerte</h2><p>Float et stock d'unités par point de vente.</p></div><Bell size={19} className="panel-heading-icon" /></div>
+          <div className="threshold-list">{points.map((point) => <ThresholdRow key={point.id} point={point} canEdit={canManage && canWrite} onSave={onSaveThreshold} />)}</div>
+          <div className="settings-note"><AlertTriangle size={16} />Un seuil trop haut génère du bruit, trop bas il prévient après la rupture. Ajustez après une semaine de ventes réelles.</div>
+        </section>
+      </div>
+
+      <div className="kpi-grid settings-kpis">
+        <KpiCard label="Relevés de commissions" value={String(statements.length)} hint="Comparez ce que l'opérateur a versé à vos commissions constatées" icon={FileText} tone="blue" />
+        <KpiCard label="Messages préparés" value={String(messages.length)} hint="Récapitulatifs et reçus à envoyer depuis WhatsApp" icon={MessageCircle} tone="teal" />
+        <KpiCard label="Événements d'audit" value={String(auditLog.length)} hint="Ouvertures, annulations, ajustements et paiements" icon={LockKeyhole} tone="ink" />
+        <KpiCard label="Communiquer" value="WhatsApp" hint="Aucun envoi automatique : vous choisissez le destinataire" icon={Send} tone="gold" />
+      </div>
+
+      <div className="settings-grid settings-grid-wide">
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Récapitulatifs & reçus</h2><p>Préparez le message du soir ou un reçu client, puis envoyez-le vous-même.</p></div><MessageCircle size={19} className="panel-heading-icon" /></div>
+          <div className="settings-actions">
+            <button className="button button-dark" onClick={onShareRecap}><Send size={15} />Préparer le récap du soir</button>
+            <button className="button button-outline" onClick={() => onOpenModal("statement")}><Download size={15} />Ajouter un relevé opérateur</button>
+            {canWrite && <button className="button button-outline" onClick={() => onOpenUnit("unit-appro")}><Package size={15} />Approvisionner les unités</button>}
+          </div>
+          {messages.length > 0 && <div className="settings-message-list">{messages.slice(0, 3).map((message) => <div key={message.id}><strong>{message.destinataire}</strong><span>{message.contenu.slice(0, 110)}…</span></div>)}</div>}
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading"><div><h2>Journal d'audit</h2><p>Qui a fait quoi, et quand.</p></div><FileText size={19} className="panel-heading-icon" /></div>
+          <AuditList entries={auditLog.slice(0, 12)} agents={agents} />
+        </section>
+      </div>
+
       <section className="panel integrity-panel">
         <div className="integrity-icon"><LockKeyhole size={18} /></div>
         <div>
@@ -1348,22 +2490,6 @@ function SettingsPage({ agency, user, subscription, operators, rules, onOpenModa
   );
 }
 
-function SettingRow({ label, value }) {
-  return <div className="setting-row"><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function ModalShell({ title, subtitle, onClose, children, wide = false }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-card ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}><div className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" onClick={onClose} aria-label="Fermer"><X size={18} /></button></div>{children}</section></div>;
-}
-
-function ModalError({ children }) {
-  return children ? <div className="form-alert error"><AlertTriangle size={15} />{children}</div> : null;
-}
-
-function ModalActions({ onCancel, loading, label = "Enregistrer" }) {
-  return <div className="modal-actions"><button type="button" className="button button-outline" onClick={onCancel} disabled={loading}>Annuler</button><button type="submit" className="button button-dark" disabled={loading}>{loading ? "Enregistrement…" : label}<ArrowRight size={15} /></button></div>;
-}
-
 function TransactionModal({ sessions, points, operators, rules, summaries, onClose, onSave }) {
   const [type, setType] = useState("depot");
   const [sessionId, setSessionId] = useState(sessions[0]?.id || "");
@@ -1372,7 +2498,9 @@ function TransactionModal({ sessions, points, operators, rules, summaries, onClo
   const [paymentMode, setPaymentMode] = useState("especes");
   const [paymentOperatorCode, setPaymentOperatorCode] = useState(operators[0]?.code || "orange");
   const [amount, setAmount] = useState("");
+  const [settlement, setSettlement] = useState("");
   const [commissionActual, setCommissionActual] = useState("");
+  const [beneficiary, setBeneficiary] = useState("");
   const [reference, setReference] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1391,6 +2519,9 @@ function TransactionModal({ sessions, points, operators, rules, summaries, onClo
       if (type === "transfert" && (!destinationCode || destinationCode === operatorCode)) throw new Error("Choisissez un opérateur de destination différent.");
       if (isUnitMovement && paymentMode === "wallet" && !paymentOperatorCode) throw new Error("Choisissez l'opérateur utilisé pour le règlement.");
       const realCommission = isUnitSupply ? 0 : (commissionActual.trim() === "" ? null : safeAmount(commissionActual, "La commission", true));
+      const regulated = isUnitMovement && settlement.trim() !== ""
+        ? safeAmount(settlement, "Le montant réellement réglé", true)
+        : money;
       setLoading(true);
       await onSave({
         session_id: sessionId,
@@ -1398,6 +2529,9 @@ function TransactionModal({ sessions, points, operators, rules, summaries, onClo
         operateur_code: operatorCode,
         operateur_destination_code: type === "transfert" ? destinationCode : null,
         montant: money,
+        montant_reglement: isUnitMovement ? regulated : money,
+        beneficiaire_masque: isUnitMovement && type === "transfert_unites" ? beneficiary : null,
+        ajustement_sens: null,
         commission_estimee: estimate,
         commission_reelle: realCommission,
         mode_paiement_unites: isUnitMovement ? paymentMode : null,
@@ -1416,7 +2550,7 @@ function TransactionModal({ sessions, points, operators, rules, summaries, onClo
   return <ModalShell title="Nouvelle opération" subtitle="La transaction sera attachée à votre session ouverte." onClose={onClose} wide>
     {sessions.length ? <form className="modal-form" onSubmit={submit}>
       <FormField label="Session de caisse"><select value={sessionId} onChange={(event) => setSessionId(event.target.value)}>{sessions.map((session) => <option key={session.id} value={session.id}>{points.find((point) => point.id === session.point_id)?.nom || "Point"} · {formatTime(session.ouverte_le)}</option>)}</select></FormField>
-      <div className="operation-type-picker">{OPERATION_TYPES.map((item) => <button type="button" key={item.code} className={type === item.code ? "active" : ""} onClick={() => setType(item.code)}>{item.label}</button>)}</div>
+      <div className="operation-type-picker">{OPERATION_TYPES_SAISIE.map((item) => <button type="button" key={item.code} className={type === item.code ? "active" : ""} onClick={() => setType(item.code)}>{item.label}</button>)}</div>
       <div className="form-row">
         <FormField label={isUnitMovement ? "Opérateur du stock" : "Opérateur"}><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>
         {type === "transfert" && <FormField label="Opérateur destinataire"><select value={destinationCode} onChange={(event) => setDestinationCode(event.target.value)}>{operators.filter((operator) => operator.code !== operatorCode).map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}
@@ -1426,6 +2560,10 @@ function TransactionModal({ sessions, points, operators, rules, summaries, onClo
         {paymentMode === "wallet" && <FormField label={isUnitSupply ? "Opérateur débité" : "Opérateur crédité"}><select value={paymentOperatorCode} onChange={(event) => setPaymentOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}
       </div>}
       <FormField label={isUnitMovement ? "Valeur des unités (FCFA)" : "Montant (FCFA)"} hint={isUnitMovement ? "Saisissez la valeur faciale : le même montant ajuste stock et règlement." : undefined}><input type="number" min="1" step="1" inputMode="numeric" required autoFocus value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Ex. 25 000" /></FormField>
+      {isUnitMovement && <div className="form-row">
+        <FormField label="Montant réellement réglé (FCFA)" hint="Vide = valeur faciale. Permet de suivre les bonus grossiste et le prix de vente."><input type="number" min="0" step="1" inputMode="numeric" value={settlement} onChange={(event) => setSettlement(event.target.value)} placeholder={String(moneyPlaceholder)} /></FormField>
+        {type === "transfert_unites" && <FormField label="Bénéficiaire (facultatif)" hint="Numéro masqué à l'enregistrement."><input value={beneficiary} onChange={(event) => setBeneficiary(event.target.value)} inputMode="tel" maxLength={20} placeholder="07 00 00 00 00" /></FormField>}
+      </div>}
       {!isUnitSupply && <div className="commission-entry"><div><HandCoins size={16} /><span>Commission estimée</span><strong>{formatMoney(estimate)}</strong></div><FormField label="Commission réellement constatée (facultatif)"><input type="number" min="0" step="1" inputMode="numeric" value={commissionActual} onChange={(event) => setCommissionActual(event.target.value)} placeholder="Laisser vide si inconnue" /></FormField></div>}
       {!isUnitSupply && !rules.some((rule) => rule.operateur_code === operatorCode && rule.type_operation === type) && <div className="field-note"><AlertTriangle size={14} />Aucun barème correspondant : l'estimation vaut 0. Vous pouvez la saisir dans Réglages.</div>}
       <FormField label="Référence (facultatif)" hint="Évitez de saisir le numéro ou le nom du client."><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="N° reçu ou référence courte" /></FormField>
@@ -1444,7 +2582,9 @@ function TransactionModal({ sessions, points, operators, rules, summaries, onClo
 
 function InfoLine({ type, operator, destination, paymentMode, paymentOperator }) {
   let message;
-  if (type === "approvisionnement_unites" || type === "transfert_unites") {
+  if (type === "ajustement_unites") {
+    message = "Stock corrigé sans mouvement d'espèces ni de float";
+  } else if (type === "approvisionnement_unites" || type === "transfert_unites") {
     const supply = type === "approvisionnement_unites";
     const payment = paymentMode === "wallet" ? `float ${paymentOperator}` : "espèces";
     message = `${supply ? "Décaissement" : "Encaissement"} ${payment} · stock ${operator} ${supply ? "+" : "−"}`;
@@ -1460,15 +2600,24 @@ function InfoLine({ type, operator, destination, paymentMode, paymentOperator })
   return <><Activity size={14} /><span>{message}</span></>;
 }
 
-function OpenSessionModal({ points, operators, selectedDate, isHistorical, onClose, onSave }) {
+function OpenSessionModal({ points, operators, selectedDate, isHistorical, lastCounts = {}, onClose, onSave }) {
   const [pointId, setPointId] = useState(points[0]?.id || "");
   const [cash, setCash] = useState("");
   const [balances, setBalances] = useState(Object.fromEntries(operators.map((operator) => [operator.code, ""])));
   const [unitBalances, setUnitBalances] = useState(Object.fromEntries(operators.map((operator) => [operator.code, ""])));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [prefilled, setPrefilled] = useState(false);
   function changeBalance(code, value) { setBalances((current) => ({ ...current, [code]: value })); }
   function changeUnitBalance(code, value) { setUnitBalances((current) => ({ ...current, [code]: value })); }
+  const lastCount = lastCounts[pointId];
+  function applyLastCount() {
+    if (!lastCount) return;
+    setCash(String(lastCount.cash ?? ""));
+    setBalances(Object.fromEntries(operators.map((operator) => [operator.code, String(lastCount.balances?.[operator.code] ?? "")])));
+    setUnitBalances(Object.fromEntries(operators.map((operator) => [operator.code, String(lastCount.units?.[operator.code] ?? "")])));
+    setPrefilled(true);
+  }
   async function submit(event) {
     event.preventDefault();
     setError("");
@@ -1485,7 +2634,8 @@ function OpenSessionModal({ points, operators, selectedDate, isHistorical, onClo
   }
   return <ModalShell title="Ouvrir une session de caisse" subtitle="Saisissez les montants et stocks réellement disponibles au démarrage." onClose={onClose}>
     {points.length ? <form className="modal-form" onSubmit={submit}>
-      <FormField label="Point de vente"><select value={pointId} onChange={(event) => setPointId(event.target.value)}>{points.map((point) => <option key={point.id} value={point.id}>{point.nom} · {point.ville}</option>)}</select></FormField>
+      <FormField label="Point de vente"><select value={pointId} onChange={(event) => { setPointId(event.target.value); setPrefilled(false); setCash(""); setBalances(Object.fromEntries(operators.map((operator) => [operator.code, ""]))); setUnitBalances(Object.fromEntries(operators.map((operator) => [operator.code, ""]))); }}>{points.map((point) => <option key={point.id} value={point.id}>{point.nom} · {point.ville}</option>)}</select></FormField>
+      {lastCount && <div className="movement-hint"><History size={14} /><span>Dernier comptage : {formatDate(lastCount.date)}. <button type="button" className="text-button" onClick={applyLastCount}>{prefilled ? "Rechargé" : "Reprendre ces montants"}</button></span></div>}
       <FormField label="Espèces réellement comptées (FCFA)"><input required type="number" min="0" step="1" inputMode="numeric" value={cash} onChange={(event) => setCash(event.target.value)} placeholder="Ex. 250 000" /></FormField>
       <div className="modal-subheading"><Smartphone size={16} /><div><strong>Soldes électroniques d'ouverture</strong><span>Consultez chaque solde opérateur, puis saisissez-le.</span></div></div>
       <div className="balance-input-grid">{operators.map((operator) => <FormField key={operator.code} label={operator.nom}><input required type="number" min="0" step="1" inputMode="numeric" value={balances[operator.code] || ""} onChange={(event) => changeBalance(operator.code, event.target.value)} placeholder="0" /></FormField>)}</div>
@@ -1567,6 +2717,7 @@ function PointModal({ agency, onClose, onSave }) {
   const [name, setName] = useState("");
   const [city, setCity] = useState(agency.ville || "Daloa");
   const [threshold, setThreshold] = useState("100000");
+  const [unitThreshold, setUnitThreshold] = useState("25000");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   async function submit(event) {
@@ -1575,11 +2726,16 @@ function PointModal({ agency, onClose, onSave }) {
     try {
       if (name.trim().length < 2) throw new Error("Le nom du point doit contenir au moins 2 caractères.");
       setLoading(true);
-      await onSave({ nom: name.trim(), ville: city.trim() || agency.ville || "Daloa", seuil_alerte_float: safeAmount(threshold, "Le seuil d'alerte", true) });
+      await onSave({
+        nom: name.trim(),
+        ville: city.trim() || agency.ville || "Daloa",
+        seuil_alerte_float: safeAmount(threshold, "Le seuil d'alerte float", true),
+        seuil_alerte_unites: unitThreshold.trim() === "" ? null : safeAmount(unitThreshold, "Le seuil d'alerte unités", true),
+      });
       onClose();
     } catch (saveError) { setError(makeErrorMessage(saveError)); } finally { setLoading(false); }
   }
-  return <ModalShell title="Ajouter un point de vente" subtitle="Le point peut être associé aux sessions des agents de votre agence." onClose={onClose}><form className="modal-form" onSubmit={submit}><FormField label="Nom du point"><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex. Marché central" /></FormField><FormField label="Ville"><input required value={city} onChange={(event) => setCity(event.target.value)} /></FormField><FormField label="Seuil d'alerte float (FCFA)" hint="Utilisé comme repère visuel, sans connexion aux comptes opérateur."><input type="number" min="0" step="1" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></FormField><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Créer le point" /></form></ModalShell>;
+  return <ModalShell title="Ajouter un point de vente" subtitle="Le point peut être associé aux sessions des agents de votre agence." onClose={onClose}><form className="modal-form" onSubmit={submit}><FormField label="Nom du point"><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex. Marché central" /></FormField><FormField label="Ville"><input required value={city} onChange={(event) => setCity(event.target.value)} /></FormField><FormField label="Seuil d'alerte float (FCFA)" hint="Utilisé comme repère visuel, sans connexion aux comptes opérateur."><input type="number" min="0" step="1" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></FormField><FormField label="Seuil d'alerte stock d'unités (FCFA)" hint="Sous cette valeur faciale, la section Unités affiche « stock bas ». Laissez vide pour désactiver l'alerte."><input type="number" min="0" step="1" value={unitThreshold} onChange={(event) => setUnitThreshold(event.target.value)} /></FormField><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Créer le point" /></form></ModalShell>;
 }
 
 function CommissionModal({ operators, onClose, onSave }) {
@@ -1611,3 +2767,17 @@ function CommissionModal({ operators, onClose, onSave }) {
 }
 
 export default App;
+
+export {
+  UnitsPage,
+  UnitMovementModal,
+  OverviewPage,
+  OperationsPage,
+  CashPage,
+  TeamPage,
+  SettingsPage,
+  TransactionTable,
+  TransactionModal,
+  OpenSessionModal,
+  CloseSessionModal,
+};

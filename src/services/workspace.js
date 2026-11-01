@@ -5,6 +5,18 @@ function throwIfError(result) {
   return result.data;
 }
 
+const MISSING_TABLE_PATTERN = /does not exist|Could not find the table|schema cache|relation .* does not exist/i;
+
+/** Les modules optionnels (migration 005) restent facultatifs : table absente = liste vide. */
+export async function selectOptional(buildQuery) {
+  const result = await buildQuery();
+  if (result.error) {
+    if (MISSING_TABLE_PATTERN.test(result.error.message || "")) return [];
+    throw result.error;
+  }
+  return result.data || [];
+}
+
 async function selectAllRows(buildPage, pageSize = 1000) {
   const rows = [];
   for (let offset = 0; ; offset += pageSize) {
@@ -85,6 +97,16 @@ export async function loadWorkspace(userId, date, reportRange = { startDate: dat
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   }
 
+  const [cashMovements, creditMovements, commissionStatements, auditLog, unitTariffs, encaissements, messages] = await Promise.all([
+    selectOptional(() => supabase.from("mouvements_caisse").select("*").eq("agence_id", agencyId).order("created_at", { ascending: false }).limit(500)),
+    selectOptional(() => supabase.from("mouvements_credits_client").select("*").eq("agence_id", agencyId).order("created_at", { ascending: false }).limit(500)),
+    selectOptional(() => supabase.from("releves_commissions").select("*").eq("agence_id", agencyId).order("periode_fin", { ascending: false }).limit(120)),
+    selectOptional(() => supabase.from("journal_audit").select("*").eq("agence_id", agencyId).order("created_at", { ascending: false }).limit(200)),
+    selectOptional(() => supabase.from("baremes_unites").select("*").eq("agence_id", agencyId).order("created_at", { ascending: false })),
+    selectOptional(() => supabase.from("encaissements_marchand").select("*").eq("agence_id", agencyId).order("created_at", { ascending: false }).limit(200)),
+    selectOptional(() => supabase.from("messages_envoyes").select("*").eq("agence_id", agencyId).order("created_at", { ascending: false }).limit(100)),
+  ]);
+
   const sessionIdSet = new Set(sessionIds);
   const transactions = reportTransactions.filter((transaction) => sessionIdSet.has(transaction.session_id));
   const { agences, ...user } = profile;
@@ -103,6 +125,13 @@ export async function loadWorkspace(userId, date, reportRange = { startDate: dat
     report_transactions: reportTransactions,
     expenses,
     commission_baremes: commissionRules,
+    cash_movements: cashMovements,
+    credit_movements: creditMovements,
+    commission_statements: commissionStatements,
+    audit_log: auditLog,
+    unit_tariffs: unitTariffs,
+    encaissements,
+    messages,
   };
 }
 
@@ -127,8 +156,26 @@ export async function closeCashSession({ sessionId, cashDeclared, declaredBalanc
   return throwIfError(result);
 }
 
+// Colonnes apparues avec la migration 005. Si un projet Supabase ne l'a pas
+// encore reçue, PostgREST refuse l'insertion (« Could not find the '...' column »).
+// On réessaie alors sans ces colonnes : la caisse reste utilisable, seule la
+// marge sur les unités et les ajustements de stock sont indisponibles.
+const OPTIONAL_TRANSACTION_COLUMNS = ["montant_reglement", "ajustement_sens", "beneficiaire_masque"];
+
+function isMissingColumnError(error) {
+  const message = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`;
+  return error?.code === "PGRST204"
+    || /could not find the '[a-z_]+' column|column .* does not exist/i.test(message);
+}
+
 export async function addTransaction(transaction) {
   const result = await supabase.from("transactions").insert(transaction).select().single();
+  if (result.error && isMissingColumnError(result.error)) {
+    const fallback = { ...transaction };
+    for (const column of OPTIONAL_TRANSACTION_COLUMNS) delete fallback[column];
+    const retry = await supabase.from("transactions").insert(fallback).select().single();
+    return throwIfError(retry);
+  }
   return throwIfError(result);
 }
 
@@ -154,5 +201,35 @@ export async function cancelTransaction(transactionId, reason) {
     .eq("id", transactionId)
     .select()
     .single();
+  return throwIfError(result);
+}
+
+export async function addCashMovement(movement) {
+  const result = await supabase.from("mouvements_caisse").insert(movement).select().single();
+  return throwIfError(result);
+}
+
+export async function addCreditMovement(movement) {
+  const result = await supabase.from("mouvements_credits_client").insert(movement).select().single();
+  return throwIfError(result);
+}
+
+export async function addCommissionStatement(statement) {
+  const result = await supabase.from("releves_commissions").insert(statement).select().single();
+  return throwIfError(result);
+}
+
+export async function addUnitTariff(tariff) {
+  const result = await supabase.from("baremes_unites").insert(tariff).select().single();
+  return throwIfError(result);
+}
+
+export async function addEncaissement(payment) {
+  const result = await supabase.from("encaissements_marchand").insert(payment).select().single();
+  return throwIfError(result);
+}
+
+export async function updatePointThresholds(pointId, thresholds) {
+  const result = await supabase.from("points").update(thresholds).eq("id", pointId).select().single();
   return throwIfError(result);
 }

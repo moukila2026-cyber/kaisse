@@ -1,6 +1,6 @@
 import { todayInAbidjan } from "../domain/ledger.js";
 
-export const DEMO_DATA_KEY = "kaisse-pro-demo-v1";
+export const DEMO_DATA_KEY = "kaisse-pro-demo-v3";
 export const DEMO_ACTIVE_KEY = "kaisse-pro-demo-active";
 
 export const DEFAULT_OPERATORS = [
@@ -45,7 +45,14 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
       { id: agentId, nom: "Koné", prenom: "Awa", telephone: "+225 05 00 00 00 00", role: "agent", agence_id: "demo-agence", actif: true },
     ],
     points: [
-      { id: pointId, agence_id: "demo-agence", nom: "Centre-ville", ville: "Daloa", seuil_alerte_float: 100_000, actif: true },
+      {
+        id: pointId, agence_id: "demo-agence", nom: "Centre-ville", ville: "Daloa",
+        seuil_alerte_float: 100_000, seuil_alerte_unites: 25_000, actif: true,
+      },
+      {
+        id: "demo-point-marche", agence_id: "demo-agence", nom: "Marché de Daloa", ville: "Daloa",
+        seuil_alerte_float: 150_000, seuil_alerte_unites: 40_000, actif: true,
+      },
     ],
     operators: DEFAULT_OPERATORS,
     sessions: [
@@ -145,15 +152,114 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
       {
         id: "demo-tx-7", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
         agent_id: ownerId, operateur_code: "orange", operateur_destination_code: null,
-        type_operation: "transfert_unites", montant: 12_000, commission_estimee: 100, commission_reelle: 100,
+        type_operation: "transfert_unites", montant: 12_000, montant_reglement: 12_600,
+        commission_estimee: 100, commission_reelle: 100,
         mode_paiement_unites: "especes", operateur_paiement_code: null,
+        beneficiaire_masque: "05 ** ** 41",
         reference: "UNIT-8832", created_at: new Date(now - 8 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+      {
+        id: "demo-tx-8", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, operateur_code: "mtn", operateur_destination_code: null,
+        type_operation: "approvisionnement_unites", montant: 20_000, commission_estimee: 0, commission_reelle: 0,
+        mode_paiement_unites: "wallet", operateur_paiement_code: "wave",
+        reference: "GROS-118", created_at: new Date(now - 34 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+      {
+        id: "demo-tx-9", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, operateur_code: "wave", operateur_destination_code: null,
+        type_operation: "transfert_unites", montant: 6_000, montant_reglement: 6_300,
+        commission_estimee: 300, commission_reelle: 300,
+        mode_paiement_unites: "especes", operateur_paiement_code: null,
+        beneficiaire_masque: "07 ** ** 56", reference: "WV-2210",
+        created_at: new Date(now - 26 * 60 * 1000).toISOString(), annulee_le: null,
       },
       {
         id: "demo-tx-5", agence_id: "demo-agence", point_id: pointId, session_id: closedSessionId,
         agent_id: agentId, operateur_code: "orange", operateur_destination_code: null,
         type_operation: "retrait", montant: 20_000, commission_estimee: 100, commission_reelle: 100,
         reference: "OM-9931", created_at: new Date(now - 5 * 60 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+    ],
+    cash_movements: [
+      {
+        id: "demo-cash-1", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, sens: "entree", source: "fond_caisse", montant: 50_000,
+        motif: "Renfort de caisse pour les retraits", created_at: new Date(now - 62 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "demo-cash-2", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, sens: "sortie", source: "banque", montant: 120_000,
+        motif: "Dépôt des excédents à la banque", created_at: new Date(now - 42 * 60 * 1000).toISOString(),
+      },
+    ],
+    credit_movements: [
+      {
+        id: "demo-credit-1", agence_id: "demo-agence", point_id: pointId, client_nom: "Fatou B.",
+        client_telephone: "07 ** ** 12", sens: "credit", montant: 5_000, echeance: date,
+        note: "Unités à crédit", created_at: new Date(now - 5 * 60 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "demo-credit-2", agence_id: "demo-agence", point_id: pointId, client_nom: "Ibrahim K.",
+        client_telephone: "05 ** ** 78", sens: "credit", montant: 10_000, echeance: date,
+        note: "Avance accordée (démonstration)", created_at: new Date(now - 30 * 60 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "demo-credit-3", agence_id: "demo-agence", point_id: pointId, client_nom: "Fatou B.",
+        client_telephone: "07 ** ** 12", sens: "remboursement", montant: 2_000, echeance: null,
+        note: "Remboursement partiel", created_at: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+      },
+    ],
+    commission_statements: [
+      {
+        id: "demo-releve-1", agence_id: "demo-agence", operateur_code: "orange",
+        periode_debut: "2026-10-01", periode_fin: new Date(now - 86_400_000).toISOString().slice(0, 10),
+        montant_recu: 990, reference: "RELEVE-OM-1026", source: "SMS opérateur (démo) le 31/10",
+        created_at: new Date(now - 20 * 60 * 60 * 1000).toISOString(),
+      },
+    ],
+    unit_tariffs: [
+      {
+        id: "demo-tarif-1", agence_id: "demo-agence", operateur_code: "orange",
+        prix_valeur_faciale: 100, prix_vente: 105, actif: true, source: "Barème de démonstration fictif",
+        created_at: new Date(now - 86_400_000).toISOString(),
+      },
+      {
+        id: "demo-tarif-2", agence_id: "demo-agence", operateur_code: "wave",
+        prix_valeur_faciale: 100, prix_vente: 100, actif: true, source: "Barème de démonstration fictif",
+        created_at: new Date(now - 86_400_000).toISOString(),
+      },
+    ],
+    encaissements: [
+      {
+        id: "demo-enc-1", agence_id: "demo-agence", point_id: pointId, operateur_code: "wave",
+        montant: 35_000, commission: 350, mode: "qrcode", reference: "WV-QR-778",
+        note: "Vente de crédit prépayé au comptoir", created_at: new Date(now - 65 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "demo-enc-2", agence_id: "demo-agence", point_id: pointId, operateur_code: "orange",
+        montant: 20_000, commission: 300, mode: "lien", reference: "OM-LINK-441",
+        note: "Encaissement à distance (démo)", created_at: new Date(now - 110 * 60 * 1000).toISOString(),
+      },
+    ],
+    messages: [
+      {
+        id: "demo-message-1", agence_id: "demo-agence", canal: "whatsapp", destinataire: "Propriétaire",
+        contenu: "Récapitulatif du soir : 4 opérations, commissions 1 250 F, stock d'unités à surveiller sur Wave.",
+        statut: "prepare", created_at: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+      },
+    ],
+    audit_log: [
+      {
+        id: "demo-audit-1", agence_id: "demo-agence", acteur_id: ownerId, action: "session.ouverture",
+        entite: "sessions_caisse", entite_id: openingSessionId,
+        detail: "Ouverture avec 300 000 F d'espèces et 4 soldes opérateur",
+        created_at: new Date(now - 240 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "demo-audit-2", agence_id: "demo-agence", acteur_id: ownerId, action: "transaction.annulation",
+        entite: "transactions", entite_id: "demo-tx-10",
+        detail: "Transfert annulé — erreur de saisie", created_at: new Date(now - 95 * 60 * 1000).toISOString(),
       },
     ],
     expenses: [
@@ -163,7 +269,18 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
         montant: 8_500, note: "Course de réapprovisionnement", created_at: new Date(now - 25 * 60 * 1000).toISOString(),
       },
     ],
-    commission_baremes: [],
+    commission_baremes: [
+      {
+        id: "demo-bareme-1", agence_id: "demo-agence", operateur_code: "orange", type_operation: "transfert_unites",
+        montant_minimum: 0, montant_maximum: null, commission_fixe: 100, taux_points_base: 200,
+        source: "Barème de démonstration fictif", actif: true,
+      },
+      {
+        id: "demo-bareme-2", agence_id: "demo-agence", operateur_code: "wave", type_operation: "transfert_unites",
+        montant_minimum: 0, montant_maximum: null, commission_fixe: 0, taux_points_base: 500,
+        source: "Barème de démonstration fictif", actif: true,
+      },
+    ],
   };
 }
 
@@ -172,7 +289,21 @@ export function readDemoWorkspace() {
     const stored = localStorage.getItem(DEMO_DATA_KEY);
     if (stored) {
       const workspace = JSON.parse(stored);
-      return { ...workspace, session_units: workspace.session_units || [] };
+      return {
+        ...workspace,
+        session_units: workspace.session_units || [],
+        points: (workspace.points || []).map((point) => ({
+          ...point,
+          seuil_alerte_unites: point.seuil_alerte_unites ?? 25_000,
+        })),
+        cash_movements: workspace.cash_movements || [],
+        credit_movements: workspace.credit_movements || [],
+        commission_statements: workspace.commission_statements || [],
+        unit_tariffs: workspace.unit_tariffs || [],
+        encaissements: workspace.encaissements || [],
+        messages: workspace.messages || [],
+        audit_log: workspace.audit_log || [],
+      };
     }
   } catch (error) {
     console.warn("Impossible de lire les données de démonstration.", error);
