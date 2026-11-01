@@ -5,11 +5,36 @@ export const OPERATION_TYPES = [
   { code: "achat_credit", label: "Achat crédit via float" },
   { code: "approvisionnement_unites", label: "Approvisionnement unités" },
   { code: "transfert_unites", label: "Transfert d'unités client" },
+  { code: "ajustement_unites", label: "Ajustement de stock d'unités" },
 ];
 
-export const COMMISSION_OPERATION_TYPES = OPERATION_TYPES.filter((operation) => operation.code !== "approvisionnement_unites");
+export const OPERATION_TYPES_SAISIE = OPERATION_TYPES.filter((operation) => operation.code !== "ajustement_unites");
+
+export const COMMISSION_OPERATION_TYPES = OPERATION_TYPES.filter(
+  (operation) => operation.code !== "approvisionnement_unites" && operation.code !== "ajustement_unites",
+);
 
 export const EXPENSE_CATEGORIES = ["Transport", "Restauration", "Frais opératoires", "Autre"];
+
+export const CASH_MOVEMENT_SOURCES = [
+  { code: "banque", label: "Banque" },
+  { code: "coffre", label: "Coffre / réserve" },
+  { code: "fond_caisse", label: "Fonds de caisse" },
+  { code: "super_agent", label: "Super-agent / grossiste" },
+  { code: "autre", label: "Autre" },
+];
+
+export function unitAdjustmentDirection(transaction) {
+  if (transaction?.type_operation !== "ajustement_unites") return 0;
+  return transaction.ajustement_sens === "entree" ? 1 : -1;
+}
+
+/** Montant réellement encaissé ou décaissé (peut différer de la valeur faciale). */
+export function settlementAmount(transaction) {
+  const regulated = transaction?.montant_reglement;
+  if (regulated == null || regulated === "") return Number(transaction?.montant || 0);
+  return Number(regulated);
+}
 
 export function getReportDateRange(endDate, period = "day") {
   const days = period === "week" ? 7 : period === "month" ? 30 : 1;
@@ -83,7 +108,7 @@ export function calculateCommission(transaction, rules = []) {
     + (amount * Number(matchingRule.taux_points_base || 0)) / 10_000);
 }
 
-export function calculateSession(session, sessionFloats = [], transactions = [], expenses = [], sessionUnits = [], operators = []) {
+export function calculateSession(session, sessionFloats = [], transactions = [], expenses = [], sessionUnits = [], operators = [], cashMovements = []) {
   const activeTransactions = transactions.filter((transaction) =>
     transaction.session_id === session.id && !transaction.annulee_le,
   );
@@ -112,21 +137,27 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
     }];
   }));
 
+  let unitMargin = 0;
   for (const transaction of activeTransactions) {
     const amount = Number(transaction.montant || 0);
+    const settled = settlementAmount(transaction);
     switch (transaction.type_operation) {
       case "depot":
       case "achat_credit":
-        cashExpected += amount;
+        cashExpected += settled;
         break;
       case "retrait":
-        cashExpected -= amount;
+        cashExpected -= settled;
         break;
       case "approvisionnement_unites":
-        if (transaction.mode_paiement_unites === "especes") cashExpected -= amount;
+        if (transaction.mode_paiement_unites === "especes") cashExpected -= settled;
+        unitMargin += amount - settled;
         break;
       case "transfert_unites":
-        if (transaction.mode_paiement_unites === "especes") cashExpected += amount;
+        if (transaction.mode_paiement_unites === "especes") cashExpected += settled;
+        unitMargin += settled - amount;
+        break;
+      case "ajustement_unites":
         break;
       default:
         break;
@@ -147,13 +178,20 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
     ) {
       const paymentWallet = floatMap[transaction.operateur_paiement_code];
       if (paymentWallet) {
-        paymentWallet.theorique += transaction.type_operation === "approvisionnement_unites" ? -amount : amount;
+        paymentWallet.theorique += transaction.type_operation === "approvisionnement_unites" ? -settled : settled;
       }
     }
 
     const unitStock = unitMap[transaction.operateur_code];
     if (unitStock && transaction.type_operation === "approvisionnement_unites") unitStock.theorique += amount;
     if (unitStock && transaction.type_operation === "transfert_unites") unitStock.theorique -= amount;
+    if (unitStock && transaction.type_operation === "ajustement_unites") unitStock.theorique += unitAdjustmentDirection(transaction) * amount;
+  }
+
+  const sessionCashMovements = cashMovements.filter((movement) => movement.session_id === session.id);
+  for (const movement of sessionCashMovements) {
+    const amount = Number(movement.montant || 0);
+    cashExpected += movement.sens === "entree" ? amount : -amount;
   }
 
   for (const expense of activeExpenses) {
@@ -169,7 +207,9 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
   const cashDeclared = session.caisse_cloture_declaree == null
     ? null
     : Number(session.caisse_cloture_declaree);
-  const commissionTransactions = activeTransactions.filter((transaction) => transaction.type_operation !== "approvisionnement_unites");
+  const commissionTransactions = activeTransactions.filter(
+    (transaction) => transaction.type_operation !== "approvisionnement_unites" && transaction.type_operation !== "ajustement_unites",
+  );
   const commissionExpected = commissionTransactions.reduce(
     (total, transaction) => total + Number(transaction.commission_estimee || 0), 0,
   );
@@ -179,6 +219,12 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
   const commissionToVerify = commissionTransactions.filter((transaction) => transaction.commission_reelle == null).length;
   const volume = activeTransactions.reduce((total, transaction) => total + Number(transaction.montant || 0), 0);
   const expenseTotal = activeExpenses.reduce((total, expense) => total + Number(expense.montant || 0), 0);
+  const cashInMovements = sessionCashMovements
+    .filter((movement) => movement.sens === "entree")
+    .reduce((total, movement) => total + Number(movement.montant || 0), 0);
+  const cashOutMovements = sessionCashMovements
+    .filter((movement) => movement.sens === "sortie")
+    .reduce((total, movement) => total + Number(movement.montant || 0), 0);
   const unitRowsTracked = Object.values(unitMap).filter((row) => row.suivi);
   const unitTracked = unitRowsTracked.length === Object.keys(unitMap).length && unitRowsTracked.length > 0;
   const unitExpected = unitRowsTracked.reduce((total, row) => total + row.theorique, 0);
@@ -210,6 +256,9 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
     unitDeclared,
     unitVariance,
     unitHasDifference,
+    unitMargin,
+    cashInMovements,
+    cashOutMovements,
     commissionExpected,
     commissionDeclared,
     commissionToVerify,
@@ -222,4 +271,45 @@ export function calculateSession(session, sessionFloats = [], transactions = [],
 export function csvCell(value) {
   const text = String(value ?? "");
   return `"${text.replaceAll('"', '""')}"`;
+}
+
+/**
+ * Dernier comptage connu par point de vente, pour pré-remplir l'ouverture
+ * suivante (report du stock de clôture). On retient la dernière session
+ * clôturée ; les montants déclarés au comptage ont priorité sur le théorique.
+ */
+export function buildLastCountByPoint({
+  points = [],
+  sessions = [],
+  sessionFloats = [],
+  sessionUnits = [],
+  transactions = [],
+  expenses = [],
+  cashMovements = [],
+  operators = [],
+} = {}) {
+  const result = {};
+  for (const point of points) {
+    const closed = sessions
+      .filter((session) => session.point_id === point.id && session.statut === "cloturee")
+      .sort((a, b) => String(b.date_caisse).localeCompare(String(a.date_caisse))
+        || String(b.cloturee_le || "").localeCompare(String(a.cloturee_le || "")));
+    const session = closed[0];
+    if (!session) continue;
+    const totals = calculateSession(session, sessionFloats, transactions, expenses, sessionUnits, operators, cashMovements);
+    result[point.id] = {
+      date: session.date_caisse,
+      cash: session.caisse_cloture_declaree ?? totals.cashExpected,
+      balances: Object.fromEntries(operators.map((operator) => {
+        const row = sessionFloats.find((item) => item.session_id === session.id && item.operateur_code === operator.code);
+        return [operator.code, row?.solde_cloture_declare ?? totals.floatMap?.[operator.code]?.theorique ?? 0];
+      })),
+      units: Object.fromEntries(operators.map((operator) => {
+        const row = sessionUnits.find((item) => item.session_id === session.id && item.operateur_code === operator.code);
+        return [operator.code, row?.unites_cloture_declare ?? totals.unitMap?.[operator.code]?.theorique ?? 0];
+      })),
+      unitsTracked: totals.unitTracked,
+    };
+  }
+  return result;
 }

@@ -1,0 +1,24 @@
+{
+  "name": "Kaisse — caisse mobile money & unités",
+  "short_name": "Kaisse",
+  "description": "Caisse, float, stock d'unités, crédit client et prévisions pour les points mobile money de Côte d'Ivoire.",
+  "lang": "fr",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f5f4ef",
+  "theme_color": "#15323d",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Nouvelle opération", "url": "/?action=transaction" },
+    { "name": "Unités & transferts", "url": "/?page=unites" },
+    { "name": "Caisse & clôture", "url": "/?page=caisse" }
+  ]
+}

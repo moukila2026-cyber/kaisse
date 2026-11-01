@@ -22,6 +22,12 @@ export const UNIT_OPERATION_TYPES = [
     shortLabel: "Transfert client",
     direction: "out",
   },
+  {
+    code: "ajustement_unites",
+    label: "Ajustement de stock",
+    shortLabel: "Ajustement",
+    direction: "adjust",
+  },
 ];
 
 export const UNIT_TYPE_CODES = UNIT_OPERATION_TYPES.map((operation) => operation.code);
@@ -63,6 +69,18 @@ export function maskBeneficiary(input) {
 
 function toNumber(value) {
   return Number(value || 0);
+}
+
+/** Montant réellement encaissé ou décaissé, distinct de la valeur faciale. */
+export function unitSettlement(transaction) {
+  const regulated = transaction?.montant_reglement;
+  if (regulated == null || regulated === "") return toNumber(transaction?.montant);
+  return toNumber(regulated);
+}
+
+/** Sens d'un ajustement de stock : +1 entrée, −1 sortie. */
+export function adjustmentSign(transaction) {
+  return transaction?.ajustement_sens === "entree" ? 1 : -1;
 }
 
 /**
@@ -110,6 +128,8 @@ export function computeUnitStock({ operators = [], sessions = [], sessionUnits =
       declare: 0,
       ecart: 0,
       commissions: 0,
+      marge: 0,
+      ajustements: 0,
       mouvements: 0,
       ventesCount: 0,
       approCount: 0,
@@ -140,12 +160,24 @@ export function computeUnitStock({ operators = [], sessions = [], sessionUnits =
       const sold = movements
         .filter((movement) => movement.operateur_code === code && movement.type_operation === "transfert_unites")
         .reduce((sum, movement) => sum + toNumber(movement.montant), 0);
-      const sessionTheoretical = (tracked ? toNumber(openingRow.unites_ouverture) : 0) + approved - sold;
+      const adjusted = movements
+        .filter((movement) => movement.operateur_code === code && movement.type_operation === "ajustement_unites")
+        .reduce((sum, movement) => sum + adjustmentSign(movement) * toNumber(movement.montant), 0);
+      const margin = movements
+        .filter((movement) => movement.operateur_code === code)
+        .reduce((sum, movement) => {
+          if (movement.type_operation === "transfert_unites") return sum + unitSettlement(movement) - toNumber(movement.montant);
+          if (movement.type_operation === "approvisionnement_unites") return sum + toNumber(movement.montant) - unitSettlement(movement);
+          return sum;
+        }, 0);
+      const sessionTheoretical = (tracked ? toNumber(openingRow.unites_ouverture) : 0) + approved - sold + adjusted;
 
       if (mode === "stock") {
         row.ouverture += tracked ? toNumber(openingRow.unites_ouverture) : 0;
         row.approvisionnements += approved;
         row.ventes += sold;
+        row.ajustements += adjusted;
+        row.marge += margin;
         row.theorique += sessionTheoretical;
         row.commissions += movements
           .filter((movement) => movement.operateur_code === code)
@@ -191,6 +223,8 @@ export function computeUnitStock({ operators = [], sessions = [], sessionUnits =
   const totalAppro = operatorRows.reduce((sum, row) => sum + row.approvisionnements, 0);
   const totalVentes = operatorRows.reduce((sum, row) => sum + row.ventes, 0);
   const totalCommissions = operatorRows.reduce((sum, row) => sum + row.commissions, 0);
+  const totalMargin = operatorRows.reduce((sum, row) => sum + row.marge, 0);
+  const totalAjustements = operatorRows.reduce((sum, row) => sum + row.ajustements, 0);
   const totalMouvements = operatorRows.reduce((sum, row) => sum + row.mouvements, 0);
   const ecartsCalculables = operatorRows.filter((row) => row.ecart != null).length;
   const totalEcart = operatorRows.reduce((sum, row) => sum + toNumber(row.ecart), 0);
@@ -202,6 +236,8 @@ export function computeUnitStock({ operators = [], sessions = [], sessionUnits =
     totalAppro,
     totalVentes,
     totalCommissions,
+    totalMargin,
+    totalAjustements,
     totalMouvements,
     totalEcart: ecartsCalculables ? totalEcart : null,
     ecartsCalculables,
@@ -256,20 +292,34 @@ export function summarizeUnitMovements(transactions = []) {
     (sum, transaction) => sum + toNumber(transaction.commission_reelle ?? transaction.commission_estimee),
     0,
   );
+  const adjustmentsIn = valid
+    .filter((transaction) => transaction.type_operation === "ajustement_unites" && adjustmentSign(transaction) > 0)
+    .reduce((sum, transaction) => sum + toNumber(transaction.montant), 0);
+  const adjustmentsOut = valid
+    .filter((transaction) => transaction.type_operation === "ajustement_unites" && adjustmentSign(transaction) < 0)
+    .reduce((sum, transaction) => sum + toNumber(transaction.montant), 0);
+  const margin = valid.reduce((sum, transaction) => {
+    if (transaction.type_operation === "transfert_unites") return sum + unitSettlement(transaction) - toNumber(transaction.montant);
+    if (transaction.type_operation === "approvisionnement_unites") return sum + toNumber(transaction.montant) - unitSettlement(transaction);
+    return sum;
+  }, 0);
   const commissionsToVerify = valid
     .filter((transaction) => transaction.type_operation !== "approvisionnement_unites" && transaction.commission_reelle == null)
     .length;
   const cashIn = valid
     .filter((transaction) => transaction.type_operation === "transfert_unites" && transaction.mode_paiement_unites !== "wallet")
-    .reduce((sum, transaction) => sum + toNumber(transaction.montant), 0);
+    .reduce((sum, transaction) => sum + unitSettlement(transaction), 0);
   const cashOut = valid
     .filter((transaction) => transaction.type_operation === "approvisionnement_unites" && transaction.mode_paiement_unites !== "wallet")
-    .reduce((sum, transaction) => sum + toNumber(transaction.montant), 0);
+    .reduce((sum, transaction) => sum + unitSettlement(transaction), 0);
   return {
     rows: unitTransactions,
     valid,
     approved,
     sold,
+    margin,
+    adjustmentsIn,
+    adjustmentsOut,
     commissions,
     commissionsToVerify,
     cashIn,

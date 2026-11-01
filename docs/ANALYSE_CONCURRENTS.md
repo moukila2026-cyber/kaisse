@@ -90,6 +90,29 @@ D'après le site public [kaissseapp.vercel.app](https://kaissseapp.vercel.app) e
 - **Garantir des commissions** : les barèmes changent ; conserver le couple « estimé / réel » déjà en place.
 - **Copier les POS européens** (fidélité, cartes, catalogues) : ce n'est pas le métier d'un point mobile money ivoirien.
 
+## 4 bis. État d'implémentation (novembre 2026)
+
+La feuille de route ci-dessous a été implémentée dans la V2 (branche `arena/19594acb-kaisse`), sans API opérateur et sans casser la V1.
+
+| # | Fonctionnalité | État | Où |
+|---|---|---|---|
+| 1 | Report du stock de clôture vers l'ouverture suivante | **Partiel** : la clôture conserve un stock final par opérateur et l'ouverture suivante le pré-remplit si la session précédente était suivie ; un comptage reste obligatoire | `Caisse`, `Unités` |
+| 2 | Marge réelle sur les unités | **Fait** : barèmes prix d'achat / prix de vente par opérateur, `montant_reglement` sur chaque mouvement, marge et taux effectif affichés | `Unités`, `Réglages` |
+| 3 | Alertes + récapitulatif WhatsApp | **Fait** : centre d'alertes et cloche, récap du soir et reçus préparés puis partagés manuellement | toutes les pages |
+| 4 | Mode hors ligne (PWA) | **Fait (coquille)** : manifeste installable et service worker qui sert l'application hors ligne ; les données restent locales (démo `localStorage`) ou chez Supabase, sans file de synchronisation | racine, `src/pwa.js` |
+| 5 | Tableau de bord multi-points | **Fait** : consolidation par point, résultat, alertes, trésorerie, performance de l'équipe | `Pilotage` |
+| 6 | Ajustement d'inventaire motivé | **Fait** : mode « ajustement » de la modale d'unités, motif obligatoire, contrôle de stock, tracé dans l'audit | `Unités` |
+| 7 | Rapprochement des commissions | **Fait** : saisie du relevé opérateur, comparaison attendu / constaté / reçu, vue SQL `v_rapprochement_commissions` | `Pilotage`, `Réglages` |
+| 8 | Prévision de rupture | **Fait** : moyenne des sorties sur 7 jours, jours de couverture, date de rupture, quantité recommandée, pour unités et float | `Pilotage`, `Unités` |
+| 9 | Journal d'audit et rôles | **Fait (partiel)** : journal d'audit (ouverture, clôture, annulation, ajustement, mouvements, crédit, relevé) et rôles existants ; pas encore de PIN sur actions sensibles | `Réglages`, `Clients` |
+| 10 | Reçus clients + carnet de crédit | **Fait** : reçu partageable, carnet de crédit (crédit / remboursement / échéance / retard) avec numéros masqués | `Unités`, `Clients` |
+| 11 | Exports comptables | **Partiel** : CSV enrichi (montant réglé, marge, bénéficiaire masqué) et PDF imprimable ; pas encore de plan comptable OHADA ni de TVA | `Opérations`, `Unités` |
+| 12 | Photo du reçu + OCR | **Non fait** : dépend d'un service externe, hors périmètre V2 | — |
+| 13 | Transferts d'espèces | **Fait** : mouvements de caisse (banque, coffre, fonds de caisse, super-agent) intégrés au théorique d'espèces | `Caisse` |
+| — | Encaissements marchands QR/lien | **Fait** : journal des encaissements (mode QR, lien, espèces) et totaux par opérateur | `Clients` |
+
+Restent hors périmètre assumé : lecture automatisée des soldes opérateur (P2 #14), marketplace de float (#15), conformité BCEAO automatisée (#16), multi-pays (#17), matériel (#18).
+
 ## 5. Positionnement recommandé
 
 > « La caisse et le stock de votre point mobile money, unités incluses — utilisable hors ligne, en français, à 10 000 FCFA par mois. »

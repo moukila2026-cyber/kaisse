@@ -32,7 +32,15 @@ La section **Unités & transferts** rend ces mouvements explicites, les chiffre 
 | Approvisionnement d'unités | caisse espèces − | float de l'opérateur choisi − |
 | Transfert d'unités au client | caisse espèces + | float de l'opérateur choisi + |
 
-Dans les deux cas, le **stock de l'opérateur des unités** est respectivement + ou −. Le montant saisi est à la fois la valeur faciale et le règlement : les bonus et remises se suivent dans la commission réelle (voir limites).
+Dans les deux cas, le **stock de l'opérateur des unités** est respectivement + ou −.
+
+Depuis la V2, la valeur faciale et le règlement sont **deux champs distincts** (`montant` et `montant_reglement`, migration 005) :
+
+- un transfert de 10 000 F de crédit facturé 10 500 F porte une **marge de 500 F** ;
+- un approvisionnement de 10 000 F payé 9 700 F au grossiste porte une **marge de 300 F** ;
+- laissé vide, le règlement vaut la valeur faciale (comportement des transactions historiques).
+
+La marge est calculée par opérateur à partir des barèmes de vente (`baremes_unites`) et des montants réellement réglés. Aucun barème n'est préchargé : chaque agence saisit son prix d'achat et son prix de vente.
 
 ## 3. Seuils et alertes
 
@@ -56,9 +64,11 @@ Dans les deux cas, le **stock de l'opérateur des unités** est respectivement +
 
 ### Modale « Mouvement d'unités »
 
-Une seule modale, deux modes : **Approvisionnement** et **Transfert client**.
-Champs : session, opérateur du stock, mode de règlement (espèces / float d'un opérateur choisi), valeur faciale, référence, bénéficiaire masqué (vente uniquement), commission réelle (vente uniquement).
-La modale rappelle le stock disponible, le stock après opération et l'effet sur la caisse.
+Une seule modale, **trois modes** (V2) : **Approvisionnement**, **Transfert client** et **Ajustement de stock**.
+Champs : session, opérateur du stock, mode de règlement (espèces / float d'un opérateur choisi), valeur faciale, **montant réellement réglé**, référence, bénéficiaire masqué (vente uniquement), commission réelle (vente uniquement).
+La modale rappelle le stock disponible, le stock après opération, l'effet sur la caisse et, si un barème de vente existe, la marge attendue.
+
+Le mode **Ajustement de stock** corrige le stock théorique après un comptage, une casse ou une erreur de saisie : il exige un motif (3 caractères minimum), n'accepte aucun règlement ni commission, et un ajustement de sortie est refusé si le stock disponible est insuffisant. Il est tracé dans le journal d'audit et n'apparaît pas dans les totaux de commissions.
 
 ### Bénéficiaire masqué
 
@@ -80,13 +90,12 @@ Migration : [`202610030004_transferts_unites.sql`](../supabase/migrations/202610
 
 La migration est additive : aucune donnée n'est supprimée ni backfillée. Les sessions déjà clôturées restent affichées « non suivi ».
 
-## 6. Limites assumées (v1)
+## 6. Limites assumées
 
 - Kaisse **n'envoie aucune recharge** : le transfert est effectué sur le téléphone ou le portail opérateur.
 - Aucun solde n'est lu chez l'opérateur : le stock est déclaré par l'agence.
-- Le prix de vente supérieur à la valeur faciale n'est pas ventilé : il se suit dans `commission_reelle`. Une évolution « prix d'achat / prix de vente / marge » est identifiée comme priorité P0 dans [`ANALYSE_CONCURRENTS.md`](ANALYSE_CONCURRENTS.md).
-- Les bonus grossiste et les remises ne sont pas modélisés séparément.
-- Pas encore d'ajustement d'inventaire motivé (casse, perte) : l'écart est constaté à la clôture.
+- Le prix de vente et le prix d'achat sont désormais suivis (`baremes_unites` + `transactions.montant_reglement`) et la marge par opérateur est calculée ; les bonus grossiste restent saisis comme un règlement plus faible, sans facture fournisseur.
+- L'ajustement d'inventaire motivé existe (mode « Ajustement ») mais il est **saisi par l'agent dans sa session** : la validation a posteriori par le gérant reste une évolution souhaitable.
 
 ## 7. Vérifications
 

@@ -95,7 +95,7 @@ Le stock théorique d'un opérateur est `stock initial + approvisionnements − 
 
 ## 5. Base Supabase livrée
 
-Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002_essai_14_jours.sql`, `202610030003_stock_unites.sql` (stock téléphonique), puis `202610030004_transferts_unites.sql` (seuil d'unités par point, bénéficiaire masqué, index et fonction de lecture du stock). Voir [`TRANSFERTS_UNITES.md`](TRANSFERTS_UNITES.md).
+Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002_essai_14_jours.sql`, `202610030003_stock_unites.sql` (stock téléphonique), `202610030004_transferts_unites.sql` (seuil d'unités par point, bénéficiaire masqué, index et fonction de lecture du stock), puis `202611010005_modules_concurrentiels.sql` (modules V2). Voir [`TRANSFERTS_UNITES.md`](TRANSFERTS_UNITES.md) et [`ANALYSE_CONCURRENTS.md`](ANALYSE_CONCURRENTS.md).
 
 | Table | Rôle / champs métier importants |
 |---|---|
@@ -109,6 +109,13 @@ Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002
 | `transactions` | Type, source/destination, montant FCFA, règlement du mouvement d'unités (espèces/wallet), commissions, référence, horodatage, motif d'annulation |
 | `depenses` | Catégorie, montant, espèces/wallet, opérateur si nécessaire, agent/session |
 | `commission_baremes` | Agence, opérateur, opération, tranche, fixe, points de base, source, actif |
+| `mouvements_caisse` | Entrées/sorties d'espèces hors opération client : banque, coffre, fonds de caisse, super-agent (migration 005) |
+| `mouvements_credits_client` | Carnet de crédit : sens `credit`/`remboursement`, montant, échéance, numéro masqué (migration 005) |
+| `encaissements_marchand` | Paiements reçus par QR code, lien ou espèces, commission constatée (migration 005) |
+| `releves_commissions` | Commissions réellement versées par un opérateur sur une période (migration 005) |
+| `baremes_unites` | Prix d'achat / prix de vente par opérateur pour une valeur faciale de référence (migration 005) |
+| `messages_envoyes` | Trace des récapitulatifs et reçus préparés, jamais envoyés automatiquement (migration 005) |
+| `journal_audit` | Lecture seule : ouvertures, clôtures, annulations, ajustements, crédits, relevés (migration 005) |
 
 ### Sécurité et intégrité
 
@@ -230,6 +237,22 @@ Avec 100 % de conversion/renouvellement et cette forte acquisition, le seuil de 
 3. **50 agences :** standardiser l'accueil, les conditions de paiement et la gestion manuelle des échéances.
 4. **100 agences :** valider les coûts d'acquisition, la qualité des exports et les besoins d'opération.
 5. **220 agences actives :** objectif théorique de 10 M FCFA bruts cumulés au cycle 8 selon les seules hypothèses ci-dessus; rapprocher les chiffres des encaissements réels.
+
+## 8 bis. Modules V2 livrés (novembre 2026)
+
+La V2 implémente la feuille de route P0/P1 sans API opérateur :
+
+- **Prévision de rupture** (unités et float) : moyenne des sorties sur la période, jours de couverture, date estimée, quantité recommandée ; niveau `rupture` à stock nul, `critique` ≤ 2 jours, `bas` au-delà.
+- **Consolidation multi-points** : par point, sessions, opérations, volume, commissions, marge unités, dépenses, résultat, soldes attendus (espèces / float / unités) et alertes.
+- **Mouvements d'espèces** intégrés au théorique de caisse : un dépôt en banque n'est plus un écart inexpliqué.
+- **Marge unités** : barème prix d'achat / prix de vente, `montant_reglement` par mouvement, taux effectif et marge par opérateur.
+- **Ajustement de stock motivé** : correction du stock théorique (casse, erreur, écart de comptage) avec contrôle de disponibilité et trace d'audit.
+- **Carnet de crédit client** : crédit / remboursement, échéance, retard, rappel WhatsApp préparé, numéro masqué.
+- **Encaissements marchands** : journal QR / lien / espèces et total par opérateur.
+- **Rapprochement des commissions** : attendu (barèmes), constaté (saisie), reçu (relevé opérateur), avec écart signalé.
+- **Centre d'alertes** et **récap du soir** / **reçus** partageables.
+- **Report du dernier comptage** : à l'ouverture, les montants de la dernière clôture (déclarés en priorité) peuvent être repris en un clic, sans jamais être imposés.
+- **PWA** : manifeste, icônes et service worker pour installer l'application et garder la coquille hors ligne.
 
 ## 9. Prochaine version après les pilotes
 
