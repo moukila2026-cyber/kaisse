@@ -298,6 +298,35 @@ dis laquelle exécuter d'abord, je ne « rattrape » rien au hasard.
   je n'ai jamais besoin de la clé `service_role` ni du mot de passe de la base.
 - Je n'exécute pas d'autres migrations sans vous le demander.
 
+### Si le connecteur est actif mais qu'aucun projet n'apparaît
+
+Cas rencontré : le connecteur autorise un compte Supabase qui ne contient aucun
+projet (organisation vide). L'inventaire renvoie `items: []` alors que tout
+semble « connecté ». Ce n'est pas une erreur de la migration : il n'y a
+simplement pas de base à migrer.
+
+À vérifier dans l'ordre :
+
+1. **Le bon compte** : se déconnecter de supabase.com dans le navigateur (ou
+   ouvrir une fenêtre privée), puis reconnecter le connecteur ; l'organisation
+   proposée doit être celle qui contient réellement le projet Kaisse.
+2. **La bonne organisation** : l'écran de consentement Supabase demande parfois
+   de choisir une organisation ; une organisation sans projet donne cet
+   inventaire vide.
+3. **Le projet existe mais vous n'y avez pas accès** : ajoutez le compte
+   connecté comme membre de l'organisation, ou transférez le projet.
+4. **Projet mis en pause** : il apparaît quand même dans l'inventaire ; s'il
+   n'apparaît pas du tout, ce n'est pas un problème de pause.
+
+Pour diagnostiquer en une requête, une fois un projet visible :
+
+```sql
+select current_database(), current_user, version();
+```
+
+Si le compte n'a toujours pas accès au bon projet, restez sur la voie SQL
+Editor : le guide des sections 2 à 6 ne dépend d'aucun connecteur.
+
 ### Si le connecteur Supabase n'apparaît pas
 
 Certaines conversations n'exposent pas ce connecteur. Trois solutions de repli,
