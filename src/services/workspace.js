@@ -156,8 +156,26 @@ export async function closeCashSession({ sessionId, cashDeclared, declaredBalanc
   return throwIfError(result);
 }
 
+// Colonnes apparues avec la migration 005. Si un projet Supabase ne l'a pas
+// encore reçue, PostgREST refuse l'insertion (« Could not find the '...' column »).
+// On réessaie alors sans ces colonnes : la caisse reste utilisable, seule la
+// marge sur les unités et les ajustements de stock sont indisponibles.
+const OPTIONAL_TRANSACTION_COLUMNS = ["montant_reglement", "ajustement_sens", "beneficiaire_masque"];
+
+function isMissingColumnError(error) {
+  const message = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`;
+  return error?.code === "PGRST204"
+    || /could not find the '[a-z_]+' column|column .* does not exist/i.test(message);
+}
+
 export async function addTransaction(transaction) {
   const result = await supabase.from("transactions").insert(transaction).select().single();
+  if (result.error && isMissingColumnError(result.error)) {
+    const fallback = { ...transaction };
+    for (const column of OPTIONAL_TRANSACTION_COLUMNS) delete fallback[column];
+    const retry = await supabase.from("transactions").insert(fallback).select().single();
+    return throwIfError(retry);
+  }
   return throwIfError(result);
 }
 

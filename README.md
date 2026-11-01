@@ -16,7 +16,7 @@ Ouvrir l'adresse affichée par Vite, puis choisir **Essayer la démo**. Les donn
 ## Connecter Supabase
 
 1. Créer un projet Supabase.
-2. Exécuter dans **SQL Editor**, dans cet ordre : `202610030001_kaisse_pro_v1.sql` → `202610030002_essai_14_jours.sql` → `202610030003_stock_unites.sql` → `202610030004_transferts_unites.sql` → `202611010005_modules_concurrentiels.sql`. N'exécuter que les fichiers qui ne sont pas encore appliqués : la cinquième est additive et idempotente.
+2. Exécuter dans **SQL Editor**, dans cet ordre : `202610030001_kaisse_pro_v1.sql` → `202610030002_essai_14_jours.sql` → `202610030003_stock_unites.sql` → `202610030004_transferts_unites.sql` → `202611010005_modules_concurrentiels.sql`. N'exécuter que les fichiers qui ne sont pas encore appliqués : la cinquième est additive et idempotente. Guide détaillé, contrôles avant/après et retour arrière : [`docs/EXECUTER_MIGRATION_005.md`](docs/EXECUTER_MIGRATION_005.md).
 3. Copier `.env.example` vers `.env.local`, puis renseigner l'URL et la clé **publique anon/publishable** du projet.
 4. Dans Supabase Auth, configurer l'URL de redirection, choisir la confirmation email et vérifier que la longueur minimale de mot de passe correspond au parcours public (6 caractères).
 5. Redémarrer le serveur Vite, créer un espace propriétaire, puis partager le code d'équipe à 8 caractères avec les gérants à inviter.

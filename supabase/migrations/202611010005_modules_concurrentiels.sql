@@ -413,25 +413,35 @@ revoke update, delete on public.journal_audit from public, anon, authenticated;
 
 create or replace view public.v_rapprochement_commissions
 with (security_invoker = true) as
+with base as (
+  select
+    t.agence_id,
+    t.operateur_code,
+    date_trunc('month', t.created_at)::date as mois,
+    count(*) as operations,
+    sum(coalesce(t.commission_estimee, 0)) as commission_attendue,
+    sum(coalesce(t.commission_reelle, 0)) as commission_constatee
+  from public.transactions t
+  where t.annulee_le is null
+    and t.type_operation not in ('approvisionnement_unites', 'ajustement_unites')
+  group by t.agence_id, t.operateur_code, date_trunc('month', t.created_at)::date
+)
 select
-  t.agence_id,
-  t.operateur_code,
-  date_trunc('month', t.created_at)::date as mois,
-  count(*) as operations,
-  sum(coalesce(t.commission_estimee, 0)) as commission_attendue,
-  sum(coalesce(t.commission_reelle, 0)) as commission_constatee,
+  b.agence_id,
+  b.operateur_code,
+  b.mois,
+  b.operations,
+  b.commission_attendue,
+  b.commission_constatee,
   coalesce((
     select sum(r.montant_recu)
     from public.releves_commissions r
-    where r.agence_id = t.agence_id
-      and r.operateur_code = t.operateur_code
-      and r.periode_debut >= date_trunc('month', t.created_at)::date
-      and r.periode_fin <= (date_trunc('month', t.created_at) + interval '1 month - 1 day')::date
+    where r.agence_id = b.agence_id
+      and r.operateur_code = b.operateur_code
+      and r.periode_debut >= b.mois
+      and r.periode_fin <= (b.mois + interval '1 month - 1 day')::date
   ), 0) as commission_recue
-from public.transactions t
-where t.annulee_le is null
-  and t.type_operation not in ('approvisionnement_unites', 'ajustement_unites')
-group by t.agence_id, t.operateur_code, date_trunc('month', t.created_at)::date;
+from base b;
 
 comment on view public.v_rapprochement_commissions is
   'Commission attendue (barèmes) / constatée (saisie) / reçue (relevés) par opérateur et par mois.';

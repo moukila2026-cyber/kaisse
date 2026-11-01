@@ -37,6 +37,11 @@ Les migrations 002 et 003 supposent respectivement que 001, puis 001+002, ont d�
 
 ## Installer les modules V2 (migration 005)
 
+> Procédure détaillée, avec requêtes de contrôle et retour arrière :
+> [`EXECUTER_MIGRATION_005.md`](EXECUTER_MIGRATION_005.md). Fichiers de
+> vérification : `supabase/verifications/005_avant.sql`,
+> `005_apres.sql`, `005_retour_arriere.sql`.
+
 La migration 005 est **strictement additive et idempotente** (`CREATE ... IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`) :
 
 - nouvelles tables `mouvements_caisse`, `mouvements_credits_client`, `encaissements_marchand`, `releves_commissions`, `baremes_unites`, `messages_envoyes`, `journal_audit` ;
