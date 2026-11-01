@@ -77,6 +77,7 @@ Le stock théorique d'un opérateur est `stock initial + approvisionnements − 
 | Connexion & inscription | Connexion, création d'agence, ou rejoindre une agence par code | Ouvrir un compte Supabase |
 | Vue d'ensemble | Date/point/session, KPIs du jour, opérations par opérateur, soldes théoriques et toutes les transactions du jour sélectionné avec date, heure, agent et opérateur; clôtures en écart | Nouvelle opération / ouvrir caisse / rapport |
 | Opérations | Journal filtrable par période, type, opérateur et agent; règlement des mouvements d'unités; commissions estimées/réelles; annulation motivée pour manager; export CSV ou PDF imprimable | Dépôt, retrait, transfert float, approvisionnement/transfert d'unités, dépense |
+| Unités & transferts | Stock d'unités par opérateur (sessions ouvertes), seuils stock bas/rupture, KPI achats/ventes/commissions, journal filtrable des mouvements d'unités, écarts de comptage, export CSV dédié | Approvisionner, enregistrer un transfert client, annuler, exporter |
 | Caisse & clôture | Sélecteur de session, soldes théoriques espèces/float, stock d'unités par opérateur, comptages réels et écarts distincts | Ouvrir, saisir dépense, clôturer sa session |
 | Équipe & points | Membres visibles selon le rôle, statut de session, points de vente, code d'invitation | Copier code / ajouter un point |
 | Réglages | Profil/agence, règles de commissions, source du barème, avertissement sur les estimations | Ajouter une tranche de barème |
@@ -94,7 +95,7 @@ Le stock théorique d'un opérateur est `stock initial + approvisionnements − 
 
 ## 5. Base Supabase livrée
 
-Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002_essai_14_jours.sql`, puis `202610030003_stock_unites.sql` (stock téléphonique).
+Migrations : `supabase/migrations/202610030001_kaisse_pro_v1.sql`, `202610030002_essai_14_jours.sql`, `202610030003_stock_unites.sql` (stock téléphonique), puis `202610030004_transferts_unites.sql` (seuil d'unités par point, bénéficiaire masqué, index et fonction de lecture du stock). Voir [`TRANSFERTS_UNITES.md`](TRANSFERTS_UNITES.md).
 
 | Table | Rôle / champs métier importants |
 |---|---|

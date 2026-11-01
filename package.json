@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint src",
-    "test": "node --test"
+    "test": "node --test",
+    "check:render": "vite build --ssr scripts/render-check.jsx --outDir .ssr-check --emptyOutDir --logLevel error && node .ssr-check/render-check.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.58.0",

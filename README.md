@@ -1,6 +1,6 @@
 # Kaisse Pro — V1
 
-Prototype web mobile-first pour le suivi manuel des opérations et le rapprochement de caisse des points Mobile Money en Côte d'Ivoire.
+Prototype web mobile-first pour le suivi manuel des opérations et le rapprochement de caisse des points Mobile Money en Côte d'Ivoire, **y compris les transferts d'unités téléphoniques** (module « Unités & transferts »).
 
 ## Lancer la démo
 
@@ -14,7 +14,7 @@ Ouvrir l'adresse affichée par Vite, puis choisir **Essayer la démo**. Les donn
 ## Connecter Supabase
 
 1. Créer un projet Supabase.
-2. Exécuter dans **SQL Editor**, dans cet ordre : `202610030001_kaisse_pro_v1.sql` → `202610030002_essai_14_jours.sql` → `202610030003_stock_unites.sql`. Si les deux premières sont déjà appliquées, exécuter uniquement la troisième.
+2. Exécuter dans **SQL Editor**, dans cet ordre : `202610030001_kaisse_pro_v1.sql` → `202610030002_essai_14_jours.sql` → `202610030003_stock_unites.sql` → `202610030004_transferts_unites.sql`. Si les trois premières sont déjà appliquées, exécuter uniquement la quatrième.
 3. Copier `.env.example` vers `.env.local`, puis renseigner l'URL et la clé **publique anon/publishable** du projet.
 4. Dans Supabase Auth, configurer l'URL de redirection, choisir la confirmation email et vérifier que la longueur minimale de mot de passe correspond au parcours public (6 caractères).
 5. Redémarrer le serveur Vite, créer un espace propriétaire, puis partager le code d'équipe à 8 caractères avec les gérants à inviter.
@@ -28,12 +28,26 @@ Ne jamais placer une clé `service_role` dans le navigateur. La clé publique n'
 
 Les migrations sont additives : les agences déjà présentes gardent les nouvelles colonnes d'abonnement à `NULL`, restent accessibles et ne sont pas rétroactivement mises en essai; la migration 003 n'altère ni ne réinitialise les données historiques. Les nouvelles agences ont 14 jours; après expiration elles passent en lecture seule sans suppression de données. Les forfaits de référence sont Starter (10 000 FCFA / 30 jours, jusqu'à 3 agents) et Pro (25 000 FCFA / 30 jours, agents illimités), sans renouvellement automatique. L'activation payée est manuelle dans cette version : SasPay n'est pas branché à ce dépôt. Voir [`docs/SUPABASE_SQL_EDITOR.md`](docs/SUPABASE_SQL_EDITOR.md) avant d'exécuter un script sur un projet déjà utilisé.
 
+## Module Unités & transferts
+
+Une section dédiée suit le stock d'unités par opérateur, séparément du float :
+
+- stock théorique = ouverture + approvisionnements − transferts clients, en valeur faciale FCFA ;
+- seuil d'alerte par point (`stock bas`, `rupture`), affiché sur la vue d'ensemble ;
+- modale unique « mouvement d'unités » (approvisionnement ou transfert client) avec règlement espèces/wallet ;
+- journal filtrable des mouvements d'unités, export CSV dédié, bénéficiaire masqué ;
+- rapprochement des écarts de stock à la clôture, sans écart inventé sur les sessions historiques.
+
+Détail des conventions, du calcul et des limites : [`docs/TRANSFERTS_UNITES.md`](docs/TRANSFERTS_UNITES.md).
+Analyse concurrentielle et pistes de fonctionnalités : [`docs/ANALYSE_CONCURRENTS.md`](docs/ANALYSE_CONCURRENTS.md).
+
 ## Vérifications
 
 ```bash
 npm test
 npm run lint
 npm run build
+npm run check:render
 ```
 
 ## Périmètre assumé

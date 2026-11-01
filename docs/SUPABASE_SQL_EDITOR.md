@@ -7,8 +7,9 @@ Les scripts complets sont dans le dépôt :
 1. [`202610030001_kaisse_pro_v1.sql`](../supabase/migrations/202610030001_kaisse_pro_v1.sql) — tables, relations, Auth, RLS et fonctions initiales d'ouverture/clôture.
 2. [`202610030002_essai_14_jours.sql`](../supabase/migrations/202610030002_essai_14_jours.sql) — essai de 14 jours et lecture seule après expiration.
 3. [`202610030003_stock_unites.sql`](../supabase/migrations/202610030003_stock_unites.sql) — stock téléphonique distinct du float, règlements espèces/wallet et clôture du comptage.
+4. [`202610030004_transferts_unites.sql`](../supabase/migrations/202610030004_transferts_unites.sql) — module « Unités & transferts » : seuil d'alerte par point, bénéficiaire masqué, index du journal unités et fonction de lecture du stock disponible.
 
-Dans Supabase : **SQL Editor → New query → coller le contenu du fichier → Run**. Sur un projet neuf, exécuter **001 → 002 → 003**, une fois chacune. Si 001 et 002 sont déjà installées, exécuter **seulement 003**. La migration 003 ajoute table/colonnes/fonctions sans mettre à jour les lignes historiques. Conservez une copie des scripts appliqués.
+Dans Supabase : **SQL Editor → New query → coller le contenu du fichier → Run**. Sur un projet neuf, exécuter **001 → 002 → 003 → 004**, une fois chacune. Si 001 à 003 sont déjà installées, exécuter **seulement 004**. La migration 003 ajoute table/colonnes/fonctions sans mettre à jour les lignes historiques. Conservez une copie des scripts appliqués.
 
 ## Important si des personnes sont déjà inscrites
 

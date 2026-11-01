@@ -1,6 +1,6 @@
 import { todayInAbidjan } from "../domain/ledger.js";
 
-export const DEMO_DATA_KEY = "kaisse-pro-demo-v1";
+export const DEMO_DATA_KEY = "kaisse-pro-demo-v2";
 export const DEMO_ACTIVE_KEY = "kaisse-pro-demo-active";
 
 export const DEFAULT_OPERATORS = [
@@ -45,7 +45,10 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
       { id: agentId, nom: "Koné", prenom: "Awa", telephone: "+225 05 00 00 00 00", role: "agent", agence_id: "demo-agence", actif: true },
     ],
     points: [
-      { id: pointId, agence_id: "demo-agence", nom: "Centre-ville", ville: "Daloa", seuil_alerte_float: 100_000, actif: true },
+      {
+        id: pointId, agence_id: "demo-agence", nom: "Centre-ville", ville: "Daloa",
+        seuil_alerte_float: 100_000, seuil_alerte_unites: 25_000, actif: true,
+      },
     ],
     operators: DEFAULT_OPERATORS,
     sessions: [
@@ -150,6 +153,21 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
         reference: "UNIT-8832", created_at: new Date(now - 8 * 60 * 1000).toISOString(), annulee_le: null,
       },
       {
+        id: "demo-tx-8", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, operateur_code: "mtn", operateur_destination_code: null,
+        type_operation: "approvisionnement_unites", montant: 20_000, commission_estimee: 0, commission_reelle: 0,
+        mode_paiement_unites: "wallet", operateur_paiement_code: "wave",
+        reference: "GROS-118", created_at: new Date(now - 34 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+      {
+        id: "demo-tx-9", agence_id: "demo-agence", point_id: pointId, session_id: openingSessionId,
+        agent_id: ownerId, operateur_code: "wave", operateur_destination_code: null,
+        type_operation: "transfert_unites", montant: 6_000, commission_estimee: 300, commission_reelle: 300,
+        mode_paiement_unites: "especes", operateur_paiement_code: null,
+        beneficiaire_masque: "07 ** ** 56", reference: "WV-2210",
+        created_at: new Date(now - 26 * 60 * 1000).toISOString(), annulee_le: null,
+      },
+      {
         id: "demo-tx-5", agence_id: "demo-agence", point_id: pointId, session_id: closedSessionId,
         agent_id: agentId, operateur_code: "orange", operateur_destination_code: null,
         type_operation: "retrait", montant: 20_000, commission_estimee: 100, commission_reelle: 100,
@@ -163,7 +181,18 @@ export function createDemoWorkspace(date = todayInAbidjan()) {
         montant: 8_500, note: "Course de réapprovisionnement", created_at: new Date(now - 25 * 60 * 1000).toISOString(),
       },
     ],
-    commission_baremes: [],
+    commission_baremes: [
+      {
+        id: "demo-bareme-1", agence_id: "demo-agence", operateur_code: "orange", type_operation: "transfert_unites",
+        montant_minimum: 0, montant_maximum: null, commission_fixe: 100, taux_points_base: 200,
+        source: "Barème de démonstration fictif", actif: true,
+      },
+      {
+        id: "demo-bareme-2", agence_id: "demo-agence", operateur_code: "wave", type_operation: "transfert_unites",
+        montant_minimum: 0, montant_maximum: null, commission_fixe: 0, taux_points_base: 500,
+        source: "Barème de démonstration fictif", actif: true,
+      },
+    ],
   };
 }
 
@@ -172,7 +201,14 @@ export function readDemoWorkspace() {
     const stored = localStorage.getItem(DEMO_DATA_KEY);
     if (stored) {
       const workspace = JSON.parse(stored);
-      return { ...workspace, session_units: workspace.session_units || [] };
+      return {
+        ...workspace,
+        session_units: workspace.session_units || [],
+        points: (workspace.points || []).map((point) => ({
+          ...point,
+          seuil_alerte_unites: point.seuil_alerte_unites ?? 25_000,
+        })),
+      };
     }
   } catch (error) {
     console.warn("Impossible de lire les données de démonstration.", error);

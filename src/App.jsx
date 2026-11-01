@@ -26,6 +26,7 @@ import {
   Mail,
   MapPin,
   MessageCircle,
+  Package,
   Plus,
   ReceiptText,
   Settings,
@@ -55,6 +56,16 @@ import {
 } from "./domain/ledger.js";
 import { getSubscriptionState } from "./domain/subscription.js";
 import {
+  canSellUnits,
+  computeUnitStock,
+  isUnitOperation,
+  maskBeneficiary,
+  summarizeUnitMovements,
+  UNIT_LEVELS,
+  UNIT_OPERATION_TYPES,
+  unitOperationLabel,
+} from "./domain/units.js";
+import {
   createDemoWorkspace,
   DEFAULT_OPERATORS,
   DEMO_ACTIVE_KEY,
@@ -79,6 +90,7 @@ import "./styles.css";
 const NAV_ITEMS = [
   { id: "apercu", label: "Vue d'ensemble", icon: LayoutDashboard },
   { id: "operations", label: "Opérations", icon: ArrowLeftRight },
+  { id: "unites", label: "Unités & transferts", icon: Package },
   { id: "caisse", label: "Caisse & clôture", icon: Wallet },
   { id: "equipe", label: "Équipe & points", icon: Users },
   { id: "reglages", label: "Réglages", icon: Settings },
@@ -132,6 +144,7 @@ function App() {
   const [pointFilter, setPointFilter] = useState("tous");
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [modal, setModal] = useState("");
+  const [unitTargetOperator, setUnitTargetOperator] = useState("");
   const [notice, setNotice] = useState(null);
   const [authMessage, setAuthMessage] = useState("");
   const [authError, setAuthError] = useState("");
@@ -261,6 +274,29 @@ function App() {
   const pointById = useMemo(() => new Map((workspace?.points || []).map((point) => [point.id, point])), [workspace]);
   const operatorByCode = useMemo(() => new Map((workspace?.operators || []).map((operator) => [operator.code, operator])), [workspace]);
 
+  // --- Suivi des unités téléphoniques (section « Unités & transferts ») ---
+  const unitThresholdByOperator = useMemo(() => {
+    const visiblePoints = (workspace?.points || []).filter((point) => pointFilter === "tous" || point.id === pointFilter);
+    const thresholds = visiblePoints
+      .map((point) => (point.seuil_alerte_unites == null ? null : Number(point.seuil_alerte_unites)))
+      .filter((value) => value != null && Number.isFinite(value) && value > 0);
+    const threshold = thresholds.length ? Math.max(...thresholds) : null;
+    const operators = workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS;
+    return Object.fromEntries(operators.map((operator) => [operator.code, threshold]));
+  }, [workspace, pointFilter]);
+
+  const unitStockOverview = useMemo(() => computeUnitStock({
+    operators: workspace?.operators?.length ? workspace.operators : DEFAULT_OPERATORS,
+    sessions: daySessions,
+    sessionUnits: workspace?.session_units || [],
+    transactions: dayTransactions,
+    thresholds: unitThresholdByOperator,
+  }), [workspace, daySessions, dayTransactions, unitThresholdByOperator]);
+
+  const unitJournal = useMemo(() => reportTransactions.filter(isUnitOperation), [reportTransactions]);
+  const unitPeriodSummary = useMemo(() => summarizeUnitMovements(unitJournal), [unitJournal]);
+
+
   function updateDemo(updater) {
     setWorkspace((previous) => {
       if (!previous?.demo) return previous;
@@ -371,11 +407,16 @@ function App() {
       if (!totals?.unitTracked) throw new Error("Le stock initial n'est pas suivi sur cette ancienne session. Clôturez-la, puis ouvrez une nouvelle session avec le stock de départ.");
       if (payload.type_operation === "transfert_unites") {
         const available = totals.unitMap[payload.operateur_code]?.theorique || 0;
-        if (Number(payload.montant) > available) throw new Error(`Stock insuffisant pour cet opérateur : disponible ${formatMoney(available)}.`);
+        const check = canSellUnits({ available, amount: payload.montant });
+        if (!check.ok) throw new Error(check.message);
       }
     }
+    // Le bénéficiaire masqué n'est envoyé que s'il existe : un projet Supabase qui
+    // n'a pas encore reçu la migration 004 continue de fonctionner.
+    const { beneficiaire_masque: beneficiary, ...rest } = payload;
     const row = {
-      ...payload,
+      ...rest,
+      ...(beneficiary ? { beneficiaire_masque: maskBeneficiary(beneficiary) } : {}),
       agence_id: workspace.agency.id,
       point_id: session.point_id,
       agent_id: workspace.user.id,
@@ -476,11 +517,13 @@ function App() {
   }
 
   async function savePoint(payload) {
+    const pointPayload = { ...payload, agence_id: workspace.agency.id };
+    if (pointPayload.seuil_alerte_unites == null) delete pointPayload.seuil_alerte_unites;
     if (workspace.demo) {
-      const point = { ...payload, id: makeDemoId("point"), agence_id: workspace.agency.id, actif: true, created_at: new Date().toISOString() };
+      const point = { ...pointPayload, id: makeDemoId("point"), actif: true, created_at: new Date().toISOString() };
       updateDemo((previous) => ({ ...previous, points: [...previous.points, point] }));
     } else {
-      await addPoint({ ...payload, agence_id: workspace.agency.id });
+      await addPoint(pointPayload);
       await refreshAfterSave();
     }
     setNotice({ type: "success", text: "Point ajouté à l'agence." });
@@ -522,6 +565,11 @@ function App() {
     } catch (error) {
       setNotice({ type: "error", text: makeErrorMessage(error) });
     }
+  }
+
+  function openUnitModal(variant, operatorCode = "") {
+    setUnitTargetOperator(operatorCode);
+    setModal(variant);
   }
 
   function resetDemo() {
@@ -596,6 +644,38 @@ function App() {
     const link = document.createElement("a");
     link.href = url;
     link.download = `kaisse-pro-${reportRange.startDate}-${reportRange.endDate}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportUnitsCsv(rows = unitJournal) {
+    const sessionById = new Map((workspace?.report_sessions || workspace?.sessions || []).map((session) => [session.id, session]));
+    const header = ["Date", "Heure", "Mouvement", "Opérateur", "Valeur faciale FCFA", "Règlement", "Bénéficiaire masqué", "Commission FCFA", "Agent", "Point", "Référence", "Statut"];
+    const lines = rows.map((transaction) => {
+      const session = sessionById.get(transaction.session_id);
+      const isWallet = transaction.mode_paiement_unites === "wallet";
+      return [
+        session?.date_caisse || selectedDate,
+        formatTime(transaction.created_at),
+        unitOperationLabel(transaction.type_operation),
+        operatorByCode.get(transaction.operateur_code)?.nom || transaction.operateur_code,
+        transaction.montant,
+        isWallet ? `Float ${operatorByCode.get(transaction.operateur_paiement_code)?.nom || transaction.operateur_paiement_code || ""}`.trim() : "Espèces",
+        transaction.beneficiaire_masque || "",
+        transaction.type_operation === "approvisionnement_unites" ? 0 : (transaction.commission_reelle ?? transaction.commission_estimee ?? ""),
+        `${agentById.get(transaction.agent_id)?.prenom || ""} ${agentById.get(transaction.agent_id)?.nom || ""}`.trim(),
+        pointById.get(transaction.point_id)?.nom || "",
+        transaction.reference || "",
+        transaction.annulee_le ? `Annulée — ${transaction.motif_annulation || ""}` : "Validée",
+      ];
+    });
+    const csv = `\uFEFF${[header, ...lines].map((row) => row.map(csvCell).join(";")).join("\r\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `kaisse-unites-${reportRange.startDate}-${reportRange.endDate}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -759,6 +839,7 @@ function App() {
             onCancel={voidTransaction}
             onShare={shareDailyReport}
             onOpenOwnSession={() => setModal("open-session")}
+            unitAlerts={unitStockOverview.alerts}
           />
         )}
 
@@ -780,6 +861,29 @@ function App() {
             onExport={exportCsv}
             onExportPdf={exportPdf}
             onCancel={voidTransaction}
+          />
+        )}
+
+        {workspace && page === "unites" && (
+          <UnitsPage
+            date={selectedDate}
+            reportRange={reportRange}
+            period={reportPeriod}
+            onPeriodChange={setReportPeriod}
+            stock={unitStockOverview}
+            journal={unitJournal}
+            summary={unitPeriodSummary}
+            operators={operatorOrder}
+            points={visiblePoints}
+            pointById={pointById}
+            agents={agentById}
+            canManage={canManage}
+            canWrite={subscription.canWrite}
+            onOpenModal={setModal}
+            onOpenUnit={openUnitModal}
+            onCancel={voidTransaction}
+            onExport={() => exportUnitsCsv(unitJournal)}
+            onGo={setPage}
           />
         )}
 
@@ -857,6 +961,30 @@ function App() {
         onClose={() => setModal("")}
         onSave={saveTransaction}
       />}
+      {modal === "unit-appro" && <UnitMovementModal
+        variant="appro"
+        initialOperator={unitTargetOperator}
+        sessions={ownOpenSessions}
+        summaries={sessionSummaries}
+        points={visiblePoints}
+        operators={operatorOrder}
+        rules={workspace.commission_baremes || []}
+        stock={unitStockOverview}
+        onClose={() => setModal("")}
+        onSave={saveTransaction}
+      />}
+      {modal === "unit-vente" && <UnitMovementModal
+        variant="vente"
+        initialOperator={unitTargetOperator}
+        sessions={ownOpenSessions}
+        summaries={sessionSummaries}
+        points={visiblePoints}
+        operators={operatorOrder}
+        rules={workspace.commission_baremes || []}
+        stock={unitStockOverview}
+        onClose={() => setModal("")}
+        onSave={saveTransaction}
+      />}
       {modal === "expense" && <ExpenseModal
         sessions={ownOpenSessions}
         points={visiblePoints}
@@ -914,7 +1042,7 @@ function LandingPage({ onDemo, onLogin }) {
         <div className="hero-copy">
           <div className="eyebrow"><span className="eyebrow-dot" /> CONÇU POUR LES POINTS MOBILE MONEY</div>
           <h1>À la fermeture,<br />sachez <em>où est votre argent.</em></h1>
-          <p>Kaisse Pro aide les gérants d'agences à suivre les opérations, les commissions déclarées et les soldes espèces / électroniques — puis à comparer le théorique au montant réellement compté.</p>
+          <p>Kaisse Pro suit les dépôts, retraits et transferts d'unités de votre point : commissions déclarées, float électronique, espèces et stock d'unités par opérateur — puis compare le théorique au montant réellement compté.</p>
           <div className="hero-actions"><button className="button button-dark button-large" onClick={onDemo}>Explorer la démo gratuite <ArrowRight size={17} /></button><button className="button button-outline button-large" onClick={onLogin}>Créer mon espace</button></div>
           <div className="hero-proof"><span><Check size={15} /> Orange · MTN · Moov · Wave</span><span><Check size={15} /> Pensé mobile d'abord</span><span><Check size={15} /> Pas besoin d'API opérateur</span></div>
         </div>
@@ -933,12 +1061,44 @@ function LandingPage({ onDemo, onLogin }) {
       <section className="landing-value">
         <div className="section-heading"><span>LE MVP, SANS LE SUPERFLU</span><h2>Le cahier devient un journal vérifiable.</h2><p>Un seul flux pour l'ouverture, les opérations, les dépenses et la clôture. Les soldes restent saisis par l'équipe et comparés à un théorique explicite.</p></div>
         <div className="value-grid">
-          <FeatureCard icon={ArrowLeftRight} number="01" title="Enregistrer l'opération" text="Dépôts, retraits, transferts de float et stock d'unités séparé, avec approvisionnements et ventes client attribués à la session." />
+          <FeatureCard icon={ArrowLeftRight} number="01" title="Enregistrer l'opération" text="Dépôts, retraits, transferts de float et mouvements d'unités, chaque ligne attribuée à une session et à un agent." />
           <FeatureCard icon={HandCoins} number="02" title="Voir les commissions" text="Barèmes configurables par agence ou saisie manuelle. Estimé et montant réel restent séparés." />
-          <FeatureCard icon={ShieldCheck} number="03" title="Rapprocher la caisse" text="Déclarez les espèces et chaque solde électronique à l'ouverture et à la fermeture." />
+          <FeatureCard icon={ShieldCheck} number="03" title="Rapprocher la caisse" text="Déclarez les espèces, chaque solde électronique et le stock d'unités à l'ouverture comme à la fermeture." />
           <FeatureCard icon={Users} number="04" title="Suivre les agents" text="Chaque session et chaque opération sont associées à un profil et à un point." />
           <FeatureCard icon={FileText} number="05" title="Partager le rapport" text="Export CSV ou PDF imprimable avec filtres de période, type, opérateur et gérant." />
           <FeatureCard icon={AlertTriangle} number="06" title="Repérer un écart" text="Le montant déclaré moins le théorique est affiché avec un signe clair et un motif à vérifier." />
+        </div>
+      </section>
+
+      <section className="landing-units">
+        <div className="units-spotlight">
+          <div className="units-spotlight-copy">
+            <span className="eyebrow">MODULE UNITÉS & TRANSFERTS</span>
+            <h2>Le stock d'unités, suivi comme le float.</h2>
+            <p>Un point qui vend des transferts d'unités gère deux trésoreries : l'argent électronique et le crédit téléphonique. Kaisse les sépare, pour que le comptage de fin de journée ne mélange plus les deux.</p>
+            <ul className="units-spotlight-list">
+              <li><Check size={15} /><span><strong>Stock par opérateur</strong> — ouverture, approvisionnements, transferts clients, valeur faciale FCFA.</span></li>
+              <li><Check size={15} /><span><strong>Règlement explicite</strong> — chaque achat ou vente indique s'il touche les espèces ou le float.</span></li>
+              <li><Check size={15} /><span><strong>Seuil d'alerte</strong> — stock bas et rupture signalés avant de refuser un client.</span></li>
+              <li><Check size={15} /><span><strong>Écart de comptage</strong> — comparé au stock réellement compté à la clôture.</span></li>
+            </ul>
+            <button className="button button-dark" onClick={onDemo}>Tester le module en démo <ArrowRight size={16} /></button>
+          </div>
+          <div className="units-spotlight-card">
+            <div className="spotlight-card-head"><span>Stock d'unités · Centre-ville</span><span className="spotlight-pill">Démo</span></div>
+            {[
+              { name: "Orange Money", stock: "68 000 F", badge: "Disponible", tone: "ok", color: "#ff7900" },
+              { name: "MTN MoMo", stock: "50 000 F", badge: "Disponible", tone: "ok", color: "#ffcc08" },
+              { name: "Moov Money", stock: "20 000 F", badge: "Stock bas", tone: "bas", color: "#0072ce" },
+              { name: "Wave", stock: "9 000 F", badge: "Stock bas", tone: "bas", color: "#1dc8e0" },
+            ].map((row) => <div className="spotlight-row" key={row.name}>
+              <span className="operator-dot" style={{ "--operator-color": row.color }} />
+              <span className="spotlight-name">{row.name}</span>
+              <strong>{row.stock}</strong>
+              <span className={`unit-level-badge ${row.tone}`}>{row.badge}</span>
+            </div>)}
+            <div className="spotlight-foot"><span>Approvisionnements du jour</span><strong>+50 000 F</strong><span>Transferts clients</span><strong>−18 000 F</strong></div>
+          </div>
         </div>
       </section>
 
@@ -1042,7 +1202,7 @@ function OverviewPage({
   selectedSessionId, onSessionChange, transactions, sessionDateById, expenses, volume, commissions,
   commissionEstimate, commissionNeedsReview, resultEstimate, closedWithDifference,
   operatorOrder, operatorByCode, pointById, agentById, canManage, canWrite, onGo, onOpenModal,
-  onShare, onOpenOwnSession, onCancel,
+  onShare, onOpenOwnSession, onCancel, unitAlerts = [],
 }) {
   const isToday = selectedDate === todayInAbidjan();
   const operatorVolumes = operatorOrder.map((operator) => ({
@@ -1080,6 +1240,7 @@ function OverviewPage({
 
       {closedWithDifference.length > 0 && <div className="alert-card"><div className="alert-mark"><AlertTriangle size={18} /></div><div><strong>{closedWithDifference.length} clôture{closedWithDifference.length > 1 ? "s" : ""} à vérifier</strong><span>Un écart négatif correspond à un montant déclaré inférieur au théorique. Vérifiez les opérations et les comptages espèces, float et unités; certaines anciennes sessions peuvent ne pas avoir de stock initial suivi.</span></div><button className="text-button" onClick={() => onGo("caisse")}>Voir la caisse <ArrowRight size={15} /></button></div>}
       {floatBelowThreshold && <div className="alert-card low-float-alert"><div className="alert-mark"><Smartphone size={18} /></div><div><strong>Float sous le seuil configuré pour {selectedPoint.nom}</strong><span>Solde théorique : {formatMoney(selectedSummary.floatExpected)} · seuil saisi par votre agence : {formatMoney(selectedPoint.seuil_alerte_float)}. Vérifiez les soldes directement auprès des opérateurs.</span></div></div>}
+      {unitAlerts.length > 0 && <div className="alert-card low-unit-alert"><div className="alert-mark"><Package size={18} /></div><div><strong>{unitAlerts.length} opérateur{unitAlerts.length > 1 ? "s" : ""} sous le seuil d'unités</strong><span>{unitAlerts.map((alert) => `${alert.nom} : ${formatMoney(alert.theorique)}`).join(" · ")} — seuil saisi {formatMoney(unitAlerts[0].seuil)}. Réapprovisionnez le stock avant la rupture.</span></div><button className="text-button" onClick={() => onGo("unites")}>Gérer les unités <ArrowRight size={15} /></button></div>}
 
       <div className="kpi-grid">
         <KpiCard label="Volume d'opérations" value={formatMoney(volume)} hint={`${transactions.filter((item) => !item.annulee_le).length} opérations · float, crédit et mouvements d'unités`} icon={Activity} tone="blue" />
@@ -1203,6 +1364,341 @@ function TransactionTable({ rows, operators, points, agents, canManage, onCancel
       {canManage && <td>{!canceled && <button className="row-action" title="Annuler avec un motif" onClick={() => onCancel(transaction)}>Annuler</button>}</td>}
     </tr>;
   })}</tbody></table></div>;
+}
+
+function UnitsPage({
+  date, reportRange, period, onPeriodChange, stock, journal, summary, operators, points, pointById,
+  agents, canManage, canWrite, onOpenModal, onOpenUnit, onCancel, onExport, onGo,
+}) {
+  const [operatorFilter, setOperatorFilter] = useState("tous");
+  const [typeFilter, setTypeFilter] = useState("tous");
+  const [hideCancelled, setHideCancelled] = useState(false);
+  const rows = journal
+    .filter((transaction) => operatorFilter === "tous" || transaction.operateur_code === operatorFilter)
+    .filter((transaction) => typeFilter === "tous" || transaction.type_operation === typeFilter)
+    .filter((transaction) => !hideCancelled || !transaction.annulee_le);
+  const filtered = summarizeUnitMovements(rows);
+  const periodLabel = reportRange.startDate === reportRange.endDate
+    ? formatDate(reportRange.endDate)
+    : `${formatDate(reportRange.startDate)} — ${formatDate(reportRange.endDate)}`;
+  const sells = summary.valid.filter((transaction) => transaction.type_operation === "transfert_unites");
+  const averageSale = sells.length ? Math.round(summary.sold / sells.length) : 0;
+
+  return (
+    <main className="content-area">
+      <PageHeading
+        eyebrow={`UNITÉS · ${formatDate(date)}`}
+        title="Unités & transferts"
+        description="Stock d'unités par opérateur, approvisionnements, transferts aux clients et écarts de comptage — séparés du float et des espèces."
+        actions={<>
+          <button className="button button-outline" onClick={onExport}><Download size={16} />CSV unités</button>
+          {canWrite && <button className="button button-soft" onClick={() => onOpenModal("unit-appro")}><ArrowDownCircle size={16} />Approvisionner</button>}
+          {canWrite && <button className="button button-dark" onClick={() => onOpenModal("unit-vente")}><ArrowUpCircle size={16} />Transfert client</button>}
+        </>}
+      />
+
+      {stock.alerts.length > 0 && <div className="alert-card low-unit-alert">
+        <div className="alert-mark"><Package size={18} /></div>
+        <div>
+          <strong>{stock.alerts.length} opérateur{stock.alerts.length > 1 ? "s" : ""} à réapprovisionner</strong>
+          <span>{stock.alerts.map((row) => `${row.nom} · ${UNIT_LEVELS[row.niveau].label.toLowerCase()} : ${formatMoney(row.theorique)} (seuil ${formatMoney(row.seuil)})`).join(" — ")}. Un transfert client est refusé lorsque le stock théorique est atteint.</span>
+        </div>
+        {canWrite && <button className="text-button" onClick={() => onOpenModal("unit-appro")}>Approvisionner <ArrowRight size={15} /></button>}
+      </div>}
+
+      {(stock.untrackedSessions > 0 || stock.untrackedClosed > 0) && <div className="alert-card unit-untracked-alert">
+        <div className="alert-mark"><LockKeyhole size={18} /></div>
+        <div>
+          <strong>{stock.untrackedSessions + stock.untrackedClosed} session{stock.untrackedSessions + stock.untrackedClosed > 1 ? "s" : ""} sans stock initial suivi</strong>
+          <span>Ces sessions ont été ouvertes avant le suivi des unités : leur comptage de clôture reste conservé, mais aucun écart d'unités n'est calculé. Si l'une est encore ouverte, clôturez-la puis ouvrez une nouvelle session avec le stock de départ.</span>
+        </div>
+        <button className="text-button" onClick={() => onGo("caisse")}>Voir la caisse <ArrowRight size={15} /></button>
+      </div>}
+
+      <div className="kpi-grid">
+        <KpiCard
+          label="Stock d'unités disponible"
+          value={formatMoney(stock.totalStock)}
+          hint={`${stock.liveSessionCount} session${stock.liveSessionCount > 1 ? "s" : ""} en cours · ${stock.tracked ? "tous les opérateurs suivis" : stock.liveSessionCount ? "suivi partiel" : "aucune session ouverte"}`}
+          icon={Package}
+          tone={stock.alerts.length ? "red" : "teal"}
+        />
+        <KpiCard
+          label="Approvisionnements de la période"
+          value={formatMoney(summary.approved)}
+          hint={`${summary.valid.filter((item) => item.type_operation === "approvisionnement_unites").length} achat(s) · payé en espèces ${formatMoney(summary.cashOut)}`}
+          icon={ArrowDownCircle}
+          tone="blue"
+        />
+        <KpiCard
+          label="Transferts aux clients"
+          value={formatMoney(summary.sold)}
+          hint={`${sells.length} vente(s) · panier moyen ${formatMoney(averageSale)} · encaissé espèces ${formatMoney(summary.cashIn)}`}
+          icon={ArrowUpCircle}
+          tone="gold"
+        />
+        <KpiCard
+          label="Commissions unités"
+          value={formatMoney(summary.commissions)}
+          hint={summary.commissionsToVerify ? `${summary.commissionsToVerify} transfert(s) sans commission réelle saisie` : "Toutes les commissions constatées sont saisies"}
+          icon={HandCoins}
+          tone="ink"
+        />
+      </div>
+
+      <section className="panel unit-stock-board">
+        <div className="panel-heading">
+          <div>
+            <h2>Stock par opérateur</h2>
+            <p>Sessions ouvertes · ouverture + approvisionnements − transferts clients · valeur faciale FCFA · {points.length > 1 ? "seuil le plus élevé des points affichés" : `seuil du point ${points[0]?.nom || ""}`}</p>
+          </div>
+          <span className="unit-stock-total">{formatMoney(stock.totalStock)}</span>
+        </div>
+        <div className="unit-cards">
+          {operators.map((operator) => {
+            const row = stock.byCode[operator.code];
+            if (!row) return null;
+            const threshold = row.seuil && row.seuil > 0 ? row.seuil : 0;
+            const gaugeMax = threshold ? threshold * 3 : Math.max(1, row.theorique);
+            const ratio = Math.max(0, Math.min(100, (row.theorique / gaugeMax) * 100));
+            const level = UNIT_LEVELS[row.niveau] || UNIT_LEVELS.non_suivi;
+            return <article className={`unit-card level-${row.niveau}`} key={operator.code}>
+              <div className="unit-card-head">
+                <span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator.couleur }} />{operator.nom}</span>
+                <span className={`unit-level-badge ${row.niveau}`}>{level.label}</span>
+              </div>
+              <strong className="unit-card-value">{row.suivi ? formatMoney(row.theorique) : "—"}</strong>
+              <div className="unit-gauge" role="img" aria-label={`Stock ${formatMoney(row.theorique)} sur un seuil de ${row.seuil == null ? "aucun seuil" : formatMoney(row.seuil)}`}>
+                <div className={`unit-gauge-fill ${row.niveau}`} style={{ width: `${row.suivi ? Math.max(ratio, row.theorique > 0 ? 4 : 0) : 0}%`, "--operator-color": operator.couleur }} />
+                {threshold > 0 && <span className="unit-gauge-mark" style={{ left: "33.33%" }} />}
+              </div>
+              <div className="unit-card-meta">
+                <span>Seuil {row.seuil == null ? "non défini" : formatMoney(row.seuil)}</span>
+                <span>Ouverture {formatMoney(row.ouverture)}</span>
+              </div>
+              <div className="unit-card-stats">
+                <div><span>Achats</span><strong className="positive">+{formatMoney(row.approvisionnements)}</strong></div>
+                <div><span>Ventes</span><strong className="negative">−{formatMoney(row.ventes)}</strong></div>
+                <div><span>Écart clôture</span><strong className={row.ecart && row.ecart !== 0 ? "negative" : ""}>{row.ecart == null ? "—" : formatMoney(row.ecart)}</strong></div>
+              </div>
+              <div className="unit-card-actions">
+                {canWrite && <button className="button button-soft" onClick={() => onOpenUnit("unit-appro", operator.code)}><ArrowDownCircle size={14} />Approvisionner</button>}
+                {canWrite && <button className="button button-outline" disabled={!row.suivi || row.theorique <= 0} onClick={() => onOpenUnit("unit-vente", operator.code)}><ArrowUpCircle size={14} />Vendre</button>}
+              </div>
+            </article>;
+          })}
+        </div>
+      </section>
+
+      <div className="units-columns">
+        <section className="panel units-journal-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Journal des mouvements d'unités</h2>
+              <p>{periodLabel} · {rows.length} ligne{rows.length > 1 ? "s" : ""} · {points.length > 1 ? "tous les points" : points[0]?.nom || "point"}</p>
+            </div>
+            <button className="text-button" onClick={onExport}><Download size={15} />Exporter</button>
+          </div>
+          <div className="unit-toolbar">
+            <label><span>Période</span><select value={period} onChange={(event) => onPeriodChange(event.target.value)}><option value="day">Jour sélectionné</option><option value="week">7 derniers jours</option><option value="month">30 derniers jours</option></select></label>
+            <label><span>Opérateur</span><select value={operatorFilter} onChange={(event) => setOperatorFilter(event.target.value)}><option value="tous">Tous</option>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></label>
+            <label><span>Mouvement</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="tous">Tous</option>{UNIT_OPERATION_TYPES.map((operation) => <option key={operation.code} value={operation.code}>{operation.shortLabel}</option>)}</select></label>
+            <label className="unit-checkbox"><input type="checkbox" checked={hideCancelled} onChange={(event) => setHideCancelled(event.target.checked)} /><span>Masquer les annulées</span></label>
+          </div>
+          <div className="unit-inline-stats">
+            <div><span>Approvisionnements</span><strong>+{formatMoney(filtered.approved)}</strong></div>
+            <div><span>Transferts clients</span><strong>−{formatMoney(filtered.sold)}</strong></div>
+            <div><span>Commissions</span><strong>{formatMoney(filtered.commissions)}</strong></div>
+            <div><span>Flux espèces net</span><strong className={filtered.netCash < 0 ? "negative" : "positive"}>{formatMoney(filtered.netCash)}</strong></div>
+          </div>
+          {rows.length
+            ? <UnitMovementTable rows={rows} operators={operators} agents={agents} pointById={pointById} canManage={canManage && canWrite} onCancel={onCancel} />
+            : <div className="empty-state compact"><Package size={24} /><strong>Aucun mouvement d'unités sur cette sélection.</strong><span>Approvisionnez le stock depuis un grossiste ou enregistrez un transfert vendu à un client.</span>{canWrite && <button className="button button-dark" onClick={() => onOpenModal("unit-appro")}>Approvisionner</button>}</div>}
+        </section>
+
+        <aside className="units-side">
+          <section className="panel unit-guide">
+            <div className="panel-heading"><div><h2>Repères de gestion</h2><p>Ce que la section calcule, et ce qu'elle ne fait pas.</p></div><Package size={19} className="panel-heading-icon" /></div>
+            <div className="unit-guide-list">
+              <div><span className="unit-guide-num">1</span><div><strong>Stock théorique</strong><p>Ouverture de session + approvisionnements − transferts clients, par opérateur, en valeur faciale FCFA.</p></div></div>
+              <div><span className="unit-guide-num">2</span><div><strong>Règlement</strong><p>Un approvisionnement en espèces réduit la caisse physique ; réglé par wallet, il réduit le float choisi. Une vente fait l'inverse.</p></div></div>
+              <div><span className="unit-guide-num">3</span><div><strong>Seuil d'alerte</strong><p>Configuré à la création du point. Sous ce seuil, la carte passe en « stock bas » ; à zéro, en « rupture ».</p></div></div>
+              <div><span className="unit-guide-num">4</span><div><strong>Écart de comptage</strong><p>Comparé au stock déclaré à la clôture de chaque session suivie. Aucun écart n'est inventé sur les anciennes sessions.</p></div></div>
+            </div>
+            <div className="unit-guide-foot"><AlertTriangle size={15} /><span>Kaisse enregistre la vente d'unités, mais n'envoie aucune recharge : le transfert reste effectué sur le téléphone ou le portail opérateur.</span></div>
+          </section>
+
+          <section className="panel unit-balance-panel">
+            <div className="panel-heading"><div><h2>Rapprochement du jour</h2><p>Écarts calculés sur les sessions clôturées.</p></div><ShieldCheck size={19} className="panel-heading-icon" /></div>
+            {stock.ecartsCalculables > 0 ? <>
+              <div className="unit-balance-total">
+                <span>Écart d'unités cumulé</span>
+                <strong className={stock.totalEcart === 0 ? "positive" : "negative"}>{stock.totalEcart > 0 ? "+" : ""}{formatMoney(stock.totalEcart)}</strong>
+              </div>
+              <div className="unit-balance-rows">
+                {stock.operators.filter((row) => row.ecart != null && row.ecart !== 0).map((row) => <div key={row.code}><span>{row.nom}</span><strong className="negative">{row.ecart > 0 ? "+" : ""}{formatMoney(row.ecart)}</strong></div>)}
+                {stock.operators.every((row) => row.ecart == null || row.ecart === 0) && <div><span>Aucun écart déclaré</span><strong className="positive">0 F</strong></div>}
+              </div>
+            </> : <div className="empty-inline">Aucune session clôturée avec stock suivi pour cette date. L'écart apparaîtra après le comptage de clôture.</div>}
+            <button className="text-button" onClick={() => onGo("caisse")}>Ouvrir Caisse & clôture <ArrowRight size={14} /></button>
+          </section>
+
+          <section className="panel unit-top-panel">
+            <div className="panel-heading"><div><h2>Unités transférées par opérateur</h2><p>Ventes de la période sélectionnée.</p></div><TrendingUp size={19} className="panel-heading-icon" /></div>
+            <div className="unit-top-rows">
+              {operators.map((operator) => {
+                const row = stock.byCode[operator.code];
+                const max = Math.max(1, ...operators.map((item) => stock.byCode[item.code]?.ventes || 0));
+                return <div className="unit-top-row" key={operator.code}>
+                  <span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator.couleur }} />{operator.nom}</span>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(row?.ventes ? 5 : 0, ((row?.ventes || 0) / max) * 100)}%`, "--operator-color": operator.couleur }} /></div>
+                  <strong>{formatMoney(row?.ventes || 0)}</strong>
+                </div>;
+              })}
+            </div>
+          </section>
+        </aside>
+      </div>
+
+      <div className="ledger-footnote"><ShieldCheck size={17} /><span>Les montants d'unités sont des valeurs faciales saisies par l'agence. Les bonus, remises et prix de vente supérieurs à la valeur faciale se suivent dans la commission réelle.</span></div>
+    </main>
+  );
+}
+
+function UnitMovementTable({ rows, operators, agents, pointById, canManage, onCancel }) {
+  return <div className="table-scroll"><table className="data-table unit-table">
+    <thead><tr><th>Heure</th><th>Mouvement</th><th>Opérateur</th><th>Valeur faciale</th><th>Règlement</th><th>Commission</th><th>Agent · point</th><th>Statut</th>{canManage && <th />}</tr></thead>
+    <tbody>{rows.map((transaction) => {
+      const operator = operators.find((item) => item.code === transaction.operateur_code);
+      const agent = agents.get(transaction.agent_id);
+      const isSale = transaction.type_operation === "transfert_unites";
+      const settledByWallet = transaction.mode_paiement_unites === "wallet";
+      const paymentOperator = operators.find((item) => item.code === transaction.operateur_paiement_code);
+      const canceled = Boolean(transaction.annulee_le);
+      const commission = transaction.commission_reelle ?? transaction.commission_estimee;
+      return <tr key={transaction.id} className={canceled ? "cancelled-row" : ""}>
+        <td className="time-cell">{formatTime(transaction.created_at)}</td>
+        <td><div className="operation-cell"><strong>{isSale ? "Transfert client" : "Approvisionnement"}</strong>{transaction.beneficiaire_masque && <small>Bénéficiaire {transaction.beneficiaire_masque}</small>}{transaction.reference && <small>Réf. {transaction.reference}</small>}{canceled && <small className="cancel-note">Annulée · {transaction.motif_annulation}</small>}</div></td>
+        <td><span className="operator-name"><span className="operator-dot" style={{ "--operator-color": operator?.couleur || "#95a0a6" }} />{operator?.nom || transaction.operateur_code}</span></td>
+        <td className={isSale ? "amount-cell negative" : "amount-cell positive"}>{isSale ? "−" : "+"}{formatMoney(transaction.montant)}</td>
+        <td><div className="operation-cell"><strong>{settledByWallet ? `Float ${paymentOperator?.nom || transaction.operateur_paiement_code || ""}` : "Espèces"}</strong><small>{isSale ? "encaissé" : "payé"}</small></div></td>
+        <td className="commission-cell">{isSale ? <><strong>{formatMoney(commission)}</strong>{transaction.commission_reelle == null && <small>estimée</small>}</> : <strong>—</strong>}</td>
+        <td><div className="operation-cell"><strong>{agent ? `${agent.prenom} ${agent.nom}`.trim() : "Agent"}</strong><small>{pointById.get(transaction.point_id)?.nom || "Point"}</small></div></td>
+        <td><span className={`unit-status ${canceled ? "cancelled" : ""}`}>{canceled ? "Annulée" : "Validée"}</span></td>
+        {canManage && <td>{!canceled && <button className="row-action" onClick={() => onCancel(transaction)}>Annuler</button>}</td>}
+      </tr>;
+    })}</tbody>
+  </table></div>;
+}
+
+function UnitMovementModal({ variant = "appro", initialOperator = "", sessions, summaries, points, operators, rules, stock, onClose, onSave }) {
+  const [mode, setMode] = useState(variant === "vente" ? "vente" : "appro");
+  const [sessionId, setSessionId] = useState(sessions[0]?.id || "");
+  const [operatorCode, setOperatorCode] = useState(
+    operators.some((operator) => operator.code === initialOperator) ? initialOperator : operators[0]?.code || "orange",
+  );
+  const [amount, setAmount] = useState("");
+  const [paymentMode, setPaymentMode] = useState("especes");
+  const [paymentOperatorCode, setPaymentOperatorCode] = useState(operators[0]?.code || "orange");
+  const [commissionActual, setCommissionActual] = useState("");
+  const [beneficiary, setBeneficiary] = useState("");
+  const [reference, setReference] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const isSale = mode === "vente";
+  const typeOperation = isSale ? "transfert_unites" : "approvisionnement_unites";
+  const selectedSession = sessions.find((session) => session.id === sessionId);
+  const selectedSummary = summaries.find(({ session }) => session.id === sessionId)?.totals;
+  const available = selectedSummary?.unitMap?.[operatorCode]?.theorique ?? stock.byCode[operatorCode]?.theorique ?? 0;
+  const unitTracked = selectedSummary?.unitTracked ?? stock.byCode[operatorCode]?.suivi ?? false;
+  const estimate = isSale ? calculateCommission({ type_operation: typeOperation, operateur_code: operatorCode, montant: amount }, rules) : 0;
+  const maskedPreview = maskBeneficiary(beneficiary);
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    try {
+      if (!sessionId) throw new Error("Vous n'avez pas de session ouverte avec ce compte.");
+      if (!unitTracked) throw new Error("Le stock initial n'est pas suivi sur cette session. Clôturez-la, puis ouvrez une nouvelle session avec le stock de départ.");
+      const money = safeAmount(amount, "La valeur des unités");
+      if (isSale) {
+        const check = canSellUnits({ available, amount: money });
+        if (!check.ok) throw new Error(check.message);
+      }
+      if (paymentMode === "wallet" && !paymentOperatorCode) throw new Error("Choisissez l'opérateur utilisé pour le règlement.");
+      const realCommission = isSale
+        ? (commissionActual.trim() === "" ? null : safeAmount(commissionActual, "La commission", true))
+        : 0;
+      setLoading(true);
+      await onSave({
+        session_id: sessionId,
+        type_operation: typeOperation,
+        operateur_code: operatorCode,
+        operateur_destination_code: null,
+        montant: money,
+        commission_estimee: estimate,
+        commission_reelle: realCommission,
+        mode_paiement_unites: paymentMode,
+        operateur_paiement_code: paymentMode === "wallet" ? paymentOperatorCode : null,
+        beneficiaire_masque: isSale ? maskedPreview : null,
+        reference: reference.trim(),
+        note: "",
+      });
+      onClose();
+    } catch (saveError) {
+      setError(makeErrorMessage(saveError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return <ModalShell
+    title={isSale ? "Transfert d'unités à un client" : "Approvisionner le stock d'unités"}
+    subtitle="Mouvement d'unités rattaché à votre session ouverte, séparé du float."
+    onClose={onClose}
+    wide
+  >
+    {sessions.length ? <form className="modal-form" onSubmit={submit}>
+      <div className="operation-type-picker unit-mode-picker">
+        <button type="button" className={!isSale ? "active" : ""} onClick={() => setMode("appro")}><ArrowDownCircle size={15} />Approvisionnement</button>
+        <button type="button" className={isSale ? "active" : ""} onClick={() => setMode("vente")}><ArrowUpCircle size={15} />Transfert client</button>
+      </div>
+      <FormField label="Session de caisse"><select value={sessionId} onChange={(event) => setSessionId(event.target.value)}>{sessions.map((session) => <option key={session.id} value={session.id}>{points.find((point) => point.id === session.point_id)?.nom || "Point"} · {formatTime(session.ouverte_le)}</option>)}</select></FormField>
+      <div className="form-row">
+        <FormField label="Opérateur du stock"><select value={operatorCode} onChange={(event) => setOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>
+        <FormField label={isSale ? "Le client règle par" : "Approvisionnement payé depuis"}><select value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)}><option value="especes">Espèces</option><option value="wallet">Float électronique</option></select></FormField>
+      </div>
+      {paymentMode === "wallet" && <FormField label={isSale ? "Float crédité" : "Float débité"}><select value={paymentOperatorCode} onChange={(event) => setPaymentOperatorCode(event.target.value)}>{operators.map((operator) => <option key={operator.code} value={operator.code}>{operator.nom}</option>)}</select></FormField>}
+      <FormField
+        label="Valeur faciale des unités (FCFA)"
+        hint={isSale
+          ? `Stock disponible : ${formatMoney(available)} · vente plafonnée à ce montant.`
+          : "Le même montant ajuste le stock et le règlement (espèces ou wallet)."}
+      >
+        <input type="number" min="1" step="1" inputMode="numeric" required autoFocus value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="Ex. 5 000" />
+      </FormField>
+      {isSale && <div className="form-row">
+        <FormField label="Numéro du bénéficiaire (facultatif)" hint={maskedPreview ? `Enregistré masqué : ${maskedPreview}` : "Seuls 2 chiffres au début et à la fin sont conservés."}>
+          <input value={beneficiary} onChange={(event) => setBeneficiary(event.target.value)} inputMode="tel" maxLength={20} placeholder="07 00 00 00 00" />
+        </FormField>
+        <FormField label="Référence (facultatif)" hint="Référence courte du reçu ou du SMS opérateur."><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="Ex. OM-1042" /></FormField>
+      </div>}
+      {!isSale && <FormField label="Référence (facultatif)"><input value={reference} onChange={(event) => setReference(event.target.value)} maxLength={80} placeholder="Bon de livraison grossiste" /></FormField>}
+      {isSale && <div className="commission-entry">
+        <div><HandCoins size={16} /><span>Commission estimée</span><strong>{formatMoney(estimate)}</strong></div>
+        <FormField label="Commission réellement constatée (facultatif)"><input type="number" min="0" step="1" inputMode="numeric" value={commissionActual} onChange={(event) => setCommissionActual(event.target.value)} placeholder="Laisser vide si inconnue" /></FormField>
+      </div>}
+      {isSale && !rules.some((rule) => rule.operateur_code === operatorCode && rule.type_operation === typeOperation) && <div className="field-note"><AlertTriangle size={14} />Aucun barème pour le transfert d'unités de cet opérateur : l'estimation vaut 0. Ajoutez une tranche dans Réglages.</div>}
+      <div className="movement-hint">
+        <InfoLine type={typeOperation} operator={operators.find((operator) => operator.code === operatorCode)?.nom} paymentMode={paymentMode} paymentOperator={operators.find((operator) => operator.code === paymentOperatorCode)?.nom} />
+        <span>Stock après opération : {formatMoney(Math.max(0, available + (isSale ? -1 : 1) * Number(amount || 0)))}</span>
+      </div>
+      {!unitTracked && <div className="field-note"><AlertTriangle size={14} />Cette session n'a pas de stock initial suivi : les mouvements d'unités y sont bloqués.</div>}
+      {selectedSession && <div className="field-note"><Clock3 size={14} />Session ouverte à {formatTime(selectedSession.ouverte_le)} · mouvement horodaté à l'enregistrement.</div>}
+      <ModalError>{error}</ModalError>
+      <ModalActions onCancel={onClose} loading={loading} label={isSale ? "Enregistrer le transfert" : "Enregistrer l'approvisionnement"} />
+    </form> : <div className="modal-empty"><Wallet size={25} /><strong>Aucune session ouverte pour votre compte.</strong><span>Ouvrez une caisse avant de saisir un mouvement d'unités.</span><button type="button" className="button button-dark" onClick={onClose}>Compris</button></div>}
+  </ModalShell>;
 }
 
 function CashPage({ date, isHistorical, user, points, operators, selectedSession, selectedSummary, summaries, selectedSessionId, onSessionChange, units, expenses, agents, canWrite, onOpenModal, onOpenOwnSession }) {
@@ -1567,6 +2063,7 @@ function PointModal({ agency, onClose, onSave }) {
   const [name, setName] = useState("");
   const [city, setCity] = useState(agency.ville || "Daloa");
   const [threshold, setThreshold] = useState("100000");
+  const [unitThreshold, setUnitThreshold] = useState("25000");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   async function submit(event) {
@@ -1575,11 +2072,16 @@ function PointModal({ agency, onClose, onSave }) {
     try {
       if (name.trim().length < 2) throw new Error("Le nom du point doit contenir au moins 2 caractères.");
       setLoading(true);
-      await onSave({ nom: name.trim(), ville: city.trim() || agency.ville || "Daloa", seuil_alerte_float: safeAmount(threshold, "Le seuil d'alerte", true) });
+      await onSave({
+        nom: name.trim(),
+        ville: city.trim() || agency.ville || "Daloa",
+        seuil_alerte_float: safeAmount(threshold, "Le seuil d'alerte float", true),
+        seuil_alerte_unites: unitThreshold.trim() === "" ? null : safeAmount(unitThreshold, "Le seuil d'alerte unités", true),
+      });
       onClose();
     } catch (saveError) { setError(makeErrorMessage(saveError)); } finally { setLoading(false); }
   }
-  return <ModalShell title="Ajouter un point de vente" subtitle="Le point peut être associé aux sessions des agents de votre agence." onClose={onClose}><form className="modal-form" onSubmit={submit}><FormField label="Nom du point"><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex. Marché central" /></FormField><FormField label="Ville"><input required value={city} onChange={(event) => setCity(event.target.value)} /></FormField><FormField label="Seuil d'alerte float (FCFA)" hint="Utilisé comme repère visuel, sans connexion aux comptes opérateur."><input type="number" min="0" step="1" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></FormField><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Créer le point" /></form></ModalShell>;
+  return <ModalShell title="Ajouter un point de vente" subtitle="Le point peut être associé aux sessions des agents de votre agence." onClose={onClose}><form className="modal-form" onSubmit={submit}><FormField label="Nom du point"><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex. Marché central" /></FormField><FormField label="Ville"><input required value={city} onChange={(event) => setCity(event.target.value)} /></FormField><FormField label="Seuil d'alerte float (FCFA)" hint="Utilisé comme repère visuel, sans connexion aux comptes opérateur."><input type="number" min="0" step="1" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></FormField><FormField label="Seuil d'alerte stock d'unités (FCFA)" hint="Sous cette valeur faciale, la section Unités affiche « stock bas ». Laissez vide pour désactiver l'alerte."><input type="number" min="0" step="1" value={unitThreshold} onChange={(event) => setUnitThreshold(event.target.value)} /></FormField><ModalError>{error}</ModalError><ModalActions onCancel={onClose} loading={loading} label="Créer le point" /></form></ModalShell>;
 }
 
 function CommissionModal({ operators, onClose, onSave }) {
@@ -1611,3 +2113,5 @@ function CommissionModal({ operators, onClose, onSave }) {
 }
 
 export default App;
+
+export { UnitsPage, UnitMovementModal };
